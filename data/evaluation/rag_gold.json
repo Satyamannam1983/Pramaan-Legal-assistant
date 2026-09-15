@@ -1,0 +1,4 @@
+[
+  {"id":"r001","query":"What is the distinction between murder and culpable homicide?","requires_abstention":false,"category":"answerable"},
+  {"id":"r002","query":"What environmental clearance is required for mining operations in Goa?","requires_abstention":true,"category":"insufficient_evidence"}
+]

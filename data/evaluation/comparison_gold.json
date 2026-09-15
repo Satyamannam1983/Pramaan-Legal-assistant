@@ -1,0 +1,3 @@
+[
+  {"id":"cmp001","document_ids":["sample_judgment","sample_statute"],"expected":"separate source namespaces and explicit limitations"}
+]

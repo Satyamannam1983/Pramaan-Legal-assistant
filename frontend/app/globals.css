@@ -1,0 +1,5 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+:root { background: #f7f8f6; color: #122033; }
+body { margin: 0; font-family: Arial, sans-serif; }

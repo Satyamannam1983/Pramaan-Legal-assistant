@@ -1,0 +1,18 @@
+{
+  "status": "NOT RUN",
+  "timestamp": "2026-09-15T17:10:19.144141+00:00",
+  "dataset_size": 0,
+  "configuration": {
+    "embedding_model": "intfloat/multilingual-e5-large",
+    "reranker_model": null,
+    "llm_model": "placeholder",
+    "rrf_k": 60,
+    "vector_top_k": 20,
+    "keyword_top_k": 20,
+    "rerank_top_k": 10
+  },
+  "metrics": {},
+  "limitations": [
+    "MongoDB-dependent benchmarks were not executed."
+  ]
+}

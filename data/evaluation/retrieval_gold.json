@@ -1,0 +1,7 @@
+[
+  {"id":"q001","query":"What is the difference between murder and culpable homicide?","relevant_chunk_ids":["sample_judgment:1","sample_judgment:2"],"relevant_document_ids":["sample_judgment"],"category":"definition"},
+  {"id":"q002","query":"What does Section 302 provide?","relevant_chunk_ids":["sample_judgment:0"],"relevant_document_ids":["sample_judgment"],"category":"section_lookup"},
+  {"id":"q003","query":"What are the remedies for breach of contract?","relevant_chunk_ids":["sample_statute:1"],"relevant_document_ids":["sample_statute"],"category":"keyword_heavy"},
+  {"id":"q004","query":"What are the requirements for anticipatory bail?","relevant_chunk_ids":["sample_judgment:4"],"relevant_document_ids":["sample_judgment"],"category":"semantic"},
+  {"id":"q005","query":"What is the purpose of the legal notice?","relevant_chunk_ids":["sample_notice:0"],"relevant_document_ids":["sample_notice"],"category":"case_lookup"}
+]

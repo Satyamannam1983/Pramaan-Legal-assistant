@@ -1,0 +1,4 @@
+[
+  {"id":"a001","query":"What is the current RBI interest rate?","requires_abstention":true},
+  {"id":"a002","query":"What is the procedure for a consumer complaint?","requires_abstention":true}
+]

@@ -1,0 +1,122 @@
+[
+  {
+    "query": "What are the essential elements required for a valid contract?",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What is the difference between murder and culpable homicide?",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What remedies are available for breach of contract?",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What is consideration in contract law?",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What is anticipatory breach and what rights does it give?",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What are the requirements for applying for anticipatory bail?",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "How is circumstantial evidence evaluated in criminal cases?",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What is the liability of a surety in a contract of guarantee?",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "What is the right to fair trial and burden of proof in criminal proceedings?",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "When can a writ of mandamus be issued against a public authority?",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "semantic"
+  },
+  {
+    "query": "Section 302 IPC murder punishment",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "exact_section"
+  },
+  {
+    "query": "Section 299 culpable homicide",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "exact_section"
+  },
+  {
+    "query": "Section 1 essential elements valid contract",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "exact_section"
+  },
+  {
+    "query": "Section 3 consideration contract law",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "exact_section"
+  },
+  {
+    "query": "Section 23 free consent coercion undue influence",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "exact_section"
+  },
+  {
+    "query": "Indian Contract Act consideration",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "act_specific"
+  },
+  {
+    "query": "Indian Penal Code murder culpable homicide",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "act_specific"
+  },
+  {
+    "query": "Code of Criminal Procedure bail provisions",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "act_specific"
+  },
+  {
+    "query": "State v. Accused Person judgment",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "case_related"
+  },
+  {
+    "query": "Supreme Court circumstantial evidence principle",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "case_related"
+  },
+  {
+    "query": "natural justice fair trial burden of proof",
+    "relevant_document_ids": ["sample_judgment"],
+    "query_type": "terminology_heavy"
+  },
+  {
+    "query": "essential ingredients negligence duty breach causation damages",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "terminology_heavy"
+  },
+  {
+    "query": "agreement enforceable law promise consideration",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "terminology_heavy"
+  },
+  {
+    "query": "anticipatory breach repudiation rights innocent party",
+    "relevant_document_ids": ["sample_statute"],
+    "query_type": "terminology_heavy"
+  }
+]

@@ -1,0 +1,5 @@
+[
+  {"failure":"MongoDB unavailable","expected_behavior":"Report NOT RUN or abstain safely","actual_behavior":"","passed":false},
+  {"failure":"Invalid citation","expected_behavior":"Do not expose it as validated","actual_behavior":"","passed":false},
+  {"failure":"Malformed document","expected_behavior":"Return a clear processing error","actual_behavior":"","passed":false}
+]

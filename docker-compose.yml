@@ -1,0 +1,52 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports: ["8000:8000"]
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/api/live')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-mongodb://db:27017/pramaan}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence_transformer}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
+      EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
+      EMBEDDING_BATCH_SIZE: ${EMBEDDING_BATCH_SIZE:-32}
+      TOP_K: ${TOP_K:-5}
+      APP_ENV: ${APP_ENV:-development}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
+
+  web:
+    build: ./frontend
+    ports: ["3000:3000"]
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api}
+    depends_on:
+      api:
+        condition: service_healthy
+
+  db:
+    image: mongo:7
+    ports: ["27017:27017"]
+    environment:
+      MONGO_INITDB_DATABASE: ${DATABASE_NAME:-pramaan}
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  mongo_data:

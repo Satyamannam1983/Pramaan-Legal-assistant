@@ -1,0 +1,6 @@
+[
+  {
+    "document_ids": ["sample_judgment", "sample_statute"],
+    "checks": ["separate citation namespaces", "unsupported differences omitted", "limitations included"]
+  }
+]

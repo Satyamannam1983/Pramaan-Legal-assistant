@@ -1,0 +1,10 @@
+[
+  {
+    "document_id": "sample_judgment",
+    "checks": ["court extraction", "case number extraction", "section references", "citation provenance"]
+  },
+  {
+    "document_id": "sample_statute",
+    "checks": ["act classification", "provision extraction", "missing court remains null"]
+  }
+]

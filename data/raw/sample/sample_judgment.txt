@@ -1,0 +1,102 @@
+SYNTHETIC SAMPLE JUDGMENT — NOT LEGAL TEXT
+For development and retrieval testing only. Do not treat as legal advice or precedent.
+
+IN THE SUPREME COURT OF INDIA
+Criminal Appeal No. 1234 of 2024
+
+STATE v. ACCUSED PERSON
+Decided: 10 September 2024
+
+JUDGMENT
+
+Part I — Background and Facts
+
+1. This appeal arises from a judgment of the High Court acquitting the respondent of charges
+under Section 302 of the Indian Penal Code. The prosecution alleged that the respondent
+caused the death of the deceased with premeditated intent, constituting murder within
+the meaning of Section 300 IPC.
+
+2. The prosecution relied on circumstantial evidence. The accused was found near the scene
+of the crime. A forensic report confirmed the cause of death as blunt force trauma.
+The accused denied involvement and claimed alibi.
+
+Part II — Law on Murder and Culpable Homicide
+
+Section 300. Murder.
+Culpable homicide is murder if the act by which the death is caused is done with the
+intention of causing death, or if the act is done with the intention of causing such
+bodily injury as the offender knows to be likely to cause the death of the person to
+whom the harm is caused, or if the act is done with the intention of causing bodily
+injury to any person and the bodily injury intended to be inflicted is sufficient in
+the ordinary course of nature to cause death.
+
+Section 299. Culpable Homicide.
+Whoever causes death by doing an act with the intention of causing death, or with the
+intention of causing such bodily injury as is likely to cause death, or with the knowledge
+that he is likely by such act to cause death, commits the offence of culpable homicide.
+
+Distinction Between Murder and Culpable Homicide.
+The distinction between murder and culpable homicide not amounting to murder turns on
+the degree of knowledge and intention. Where the act is done with the knowledge that it
+is imminently dangerous such that death is the most probable result, and there is no
+justification, it amounts to murder. Culpable homicide not amounting to murder covers
+cases where the intention and knowledge are of a lesser degree.
+
+Part III — Principles of Criminal Procedure
+
+Section 313 Examination.
+Under Section 313 of the Code of Criminal Procedure, the accused has a right to be
+examined by the court after the prosecution evidence is closed. The purpose is to afford
+the accused an opportunity to explain circumstances appearing against him. Answers given
+under Section 313 may be taken into consideration, but they are not on oath.
+
+Right to Fair Trial.
+Every accused person is entitled to a fair trial. The prosecution must prove the guilt
+of the accused beyond reasonable doubt. The burden of proof rests entirely on the
+prosecution. Mere suspicion, however grave, cannot substitute for proof.
+
+Circumstantial Evidence.
+When a case rests entirely on circumstantial evidence, the chain of circumstances must
+be complete, consistent with the guilt of the accused, and inconsistent with innocence.
+The circumstances must be of a conclusive nature and tendency. Gaps in the chain of
+circumstances must benefit the accused.
+
+Part IV — Bail and Interim Relief
+
+Section 437. Bail in Non-Bailable Offences.
+When any person accused of, or suspected of, the commission of any non-bailable offence
+is arrested or detained without warrant by an officer in charge of a police station, he
+may be released on bail, subject to the discretion of the court. In cases of serious
+offences such as murder, bail may be denied if there are reasonable grounds for believing
+the accused guilty.
+
+Section 438. Anticipatory Bail.
+Any person who has reason to believe that he may be arrested on accusation of having
+committed a non-bailable offence may apply to the Session Court or High Court for
+anticipatory bail. The court may, if it thinks fit, direct that such person shall,
+on arrest, be released on bail.
+
+Part V — Writ Jurisdiction
+
+Article 32. Writ Petition to Supreme Court.
+The right to move the Supreme Court by appropriate proceedings for the enforcement of
+fundamental rights is guaranteed. The Supreme Court shall have power to issue directions
+or orders or writs, including writs in the nature of habeas corpus, mandamus, prohibition,
+quo warranto, and certiorari, whichever may be appropriate.
+
+Habeas Corpus.
+A writ of habeas corpus may be issued to secure the release of a person who is unlawfully
+detained. The court will examine whether the detention is in accordance with law.
+
+Writ of Mandamus.
+A writ of mandamus may be issued to compel a public authority to perform a duty imposed
+on it by law which it has refused or failed to perform.
+
+Part VI — Decision and Conclusion
+
+Having considered the evidence on record, this Court finds that the prosecution has failed
+to establish a complete chain of circumstances connecting the accused to the crime.
+The benefit of doubt must be given to the accused. The acquittal by the High Court
+is upheld. This appeal is accordingly dismissed.
+
+Ordered accordingly.
