@@ -9,31 +9,39 @@ Source-first semantic search for Indian statutes, rules, and judgments. Built on
 ## Architecture
 
 ```
-                    Query
-                      ↓
-          ┌───────────┴───────────┐
-          ↓                       ↓
-     Vector Search             BM25
-     (embed query →           (tokenise →
-      cosine similarity)       BM25 scoring)
-          ↓                       ↓
-          └───────────┬───────────┘
-                      ↓
-                 RRF Fusion
-                 (reciprocal rank
-                  fusion, k=60)
-                      ↓
-               Candidate Set
-                      ↓
-              Cross-Encoder
-                 Reranker
-                      ↓
-                Top Results
-                (chunk + scores
-                 + provenance)
+General question (home UI sends one request):
+  POST /api/chat  → routes.chat → LangGraph → LegalRetrievalService
+                  → vector + BM25 → RRF → optional reranker
+                  → LegalRAGService → evidence/context → configured LLM
+                  → citation validation → ChatResponse
+  ChatResponse.search_results supplies the Evidence tab from the graph's
+  final retrieval attempt. Standalone POST /api/search remains available:
+    routes.search → LegalRetrievalService
+                  → vector + BM25 → RRF → optional reranker → SearchResponse
+
+Document operations:
+  POST /api/documents/{id}/ask → filtered LegalRetrievalService
+                               → LegalRAGService → ChatResponse
+  POST /api/documents/compare  → ComparisonService → MongoDB chunks
+  POST /api/documents/upload   → DocumentProcessingService
+                               → DocumentIndexer → embeddings + MongoDB
+
+Offline ingestion:
+  data/raw → scripts/process_documents.py → data/processed/*.jsonl
+           → scripts/index_documents.py → DocumentIndexer → MongoDB
 ```
 
-**Current status**: Steps 1–4 complete (ingestion, embedding, hybrid retrieval, reranking). Step 5 (LLM answer generation) is next.
+The classic retrieval endpoint and the bounded LangGraph answer workflow are
+separate entry points that share `LegalRetrievalService`. The home page uses
+the graph's retrieved results for both the answer and evidence tab, avoiding a
+second retrieval request. Document-specific questions use the same retrieval
+and RAG services directly, with retrieval restricted to one document.
+Comparison currently returns a metadata overview and similarities; analysis is
+extractive over indexed chunks.
+
+The upload response keeps `status: "accepted"` for compatibility and adds
+`indexing_status` (`indexed`, `skipped`, or `failed`) so callers can distinguish
+file acceptance from successful indexing.
 
 ---
 
@@ -65,10 +73,10 @@ BM25 excels at exact term matching and TF-IDF weighting. A chunk containing "Sec
 Vector scores (cosine similarity, range 0–1) and BM25 scores (unbounded, corpus-dependent) have different numerical ranges and distributions. Direct score averaging is meaningless. RRF operates on *ranks* rather than raw scores, making it robust to scale differences:
 
 ```
-RRF score = Σ 1 / (k + rank)
+RRF score = Σ weight(source) / (k + rank)
 ```
 
-The constant `k=60` (standard value from literature) balances the influence of top-ranked vs. lower-ranked results.
+`RRF_K` defaults to `60`; `VECTOR_WEIGHT` and `KEYWORD_WEIGHT` default to `0.6` and `0.4`. The weights apply to dense and BM25 rank contributions respectively. Duplicate chunks contribute at most once per source list, and tied fused scores are ordered by document ID and chunk ID.
 
 ### Why a Cross-Encoder Reranker
 The bi-encoder (embedding model) used for initial retrieval encodes query and document independently — it cannot model fine-grained query-document interactions. A cross-encoder processes `(query, document)` jointly through a single transformer, producing more accurate relevance judgments. This is especially important for legal text where subtle differences in wording change meaning significantly.
@@ -79,11 +87,13 @@ The bi-encoder (embedding model) used for initial retrieval encodes query and do
 - Local MongoDB uses a NumPy cosine-similarity fallback, which is useful for development and small corpora.
 
 ### How Retrieval Is Evaluated
-The evaluation script compares three systems on 24 queries across 5 categories (semantic, exact section, act-specific, case-related, terminology-heavy):
+The evaluation command scores the configured hybrid retrieval path against the
+explicit relevance labels in `data/evaluation/retrieval_gold.json`. It does not
+run separate vector-only, BM25-only, or reranker ablation benchmarks.
 
 | Metric | Description |
 |--------|-------------|
-| Recall@K | Fraction of queries where at least one relevant document appears in top-K |
+| Recall@K | Fraction of labeled relevant chunks/documents found in the top-K results |
 | MRR | Mean Reciprocal Rank — average of 1/rank of first relevant result |
 | NDCG@5 | Normalised Discounted Cumulative Gain — measures ranking quality |
 
@@ -121,10 +131,12 @@ Frontend: http://localhost:3000
 ## Production configuration
 
 Set `APP_ENV=production` and provide an explicit `CORS_ORIGINS` allowlist in
-`.env`. The API exposes `/api/live` for liveness and `/api/ready` for readiness;
-readiness returns HTTP 503 when MongoDB is unavailable. Debug endpoints are
-disabled in production. Rate limits, upload limits, logging level, model
-providers, and MongoDB settings are configurable through `.env.example`.
+`.env` (copy and edit `.env.example`). Settings are validated when the backend
+starts; an OpenAI-compatible provider requires `OPENAI_API_KEY`, production
+requires a non-default CORS origin, and upload/request limits and retrieval
+parameters must be valid. The API exposes `/api/live` for liveness and
+`/api/ready` for readiness; readiness returns HTTP 503 when MongoDB is
+unavailable. Debug endpoints are disabled in production.
 
 The portable deployment shape is:
 
@@ -134,8 +146,22 @@ User -> Next.js frontend -> FastAPI API -> MongoDB Atlas
                                       -> configured LLM provider
 ```
 
-Do not expose MongoDB publicly in production. The Compose database port is for
-local development; use MongoDB Atlas or a private MongoDB network in production.
+The API currently has **no authentication or authorization**. In particular,
+document upload, listing, metadata, analysis, document-specific questions,
+comparison, and search routes are not protected by a user identity or tenant
+boundary. Do not expose this API or its document data to untrusted networks;
+put it behind an authenticated/authorized gateway and implement/test access
+control before handling private legal documents. No protected multi-user
+behavior is implemented or tested.
+
+Docker Compose is a local development stack, not a production deployment
+configuration. MongoDB has no authentication configured in this Compose file,
+though its host port is bound to loopback. Use MongoDB Atlas or a private,
+authenticated MongoDB deployment for hosted environments.
+
+There is no GitHub Actions deployment workflow. The workflow named `CI` only
+checks backend tests, frontend API contract tests, and a frontend production
+build; it does not publish images, deploy services, or verify a live deployment.
 
 ---
 
@@ -156,6 +182,48 @@ python scripts/index_documents.py
 ```
 
 Reads JSONL files, generates embeddings (downloads model on first run), inserts documents and chunks into the database with vector embeddings. Idempotent — re-running updates existing records rather than duplicating them.
+
+Run both commands from the repository root. For a host-run backend, set
+`DATABASE_URL` to a host-reachable MongoDB URI (the `.env.example` default is
+`localhost`). For the Compose API container, set `COMPOSE_DATABASE_URL` to a
+container-reachable MongoDB URI (the default is `mongodb://db:27017/pramaan`).
+Indexing must complete successfully before documents can be searched; an
+upload accepted while MongoDB is unavailable is stored locally and reports
+`indexing_status: skipped`, not indexed.
+
+### Optional: small Indian Supreme Court judgment sample
+
+The public [Indian Supreme Court Judgments dataset](https://registry.opendata.aws/indian-supreme-court-judgments/)
+provides individual English PDFs at
+`data/pdf/year=<YEAR>/english/` and matching JSON metadata at
+`metadata/json/year=<YEAR>/`. Do not download the yearly archives or the full
+corpus. For example, list no more than 25 individual PDF keys:
+
+```powershell
+aws s3api list-objects-v2 --bucket indian-supreme-court-judgments `
+  --prefix data/pdf/year=2025/english/ --max-items 25 --no-sign-request `
+  --query "Contents[].Key" --output text
+```
+
+Download each selected PDF and its same-stem JSON metadata into:
+`data/raw/supreme_court_english/pdfs/` and
+`data/raw/supreme_court_english/metadata/`. Then use the shared parser and
+indexer:
+
+```powershell
+python scripts/process_documents.py data/raw/supreme_court_english/pdfs `
+  --metadata-dir data/raw/supreme_court_english/metadata `
+  --output data/processed/supreme_court_english/supreme_court_english.jsonl
+python scripts/index_documents.py --processed-dir data/processed/supreme_court_english
+```
+
+The processor keeps source filenames, page boundaries, available case metadata,
+the original metadata JSON, and source object URLs. It records the dataset's
+eCourts attribution and CC BY 4.0 license in document metadata. Local source
+PDFs are excluded from Git; obtain them again using the documented object paths.
+Atlas vector retrieval additionally requires `ATLAS_VECTOR_SEARCH=true` and a
+Search index named `embedding_index` on `document_chunks.embedding`, with the
+configured embedding dimension.
 
 ---
 
@@ -211,40 +279,71 @@ Exposes all retrieval stages: vector results, keyword results, fused results, re
 python scripts/evaluate_retrieval.py
 ```
 
-Runs the chunk-level golden queries in `data/evaluation/retrieval_gold.json` and
-compares four approaches. If MongoDB is unavailable, the command reports
-`NOT RUN` rather than treating unavailable retrieval as zero-quality results.
-
-```
-Method                  Recall@1    Recall@3    Recall@5    Recall@10  MRR        NDCG@5
----------------------------------------------------------------------------
-Vector                  ...         ...         ...         ...        ...        ...
-BM25                    ...         ...         ...         ...        ...        ...
-Hybrid                  ...         ...         ...         ...        ...        ...
-Hybrid + Reranker       ...         ...         ...         ...        ...        ...
-```
+Runs the unified evaluation workflow in retrieval-only mode. It scores the
+configured hybrid retrieval service, not separate vector/BM25 ablations.
 
 ---
 
 ## Evaluation
 
-Evaluation assets live under `data/evaluation/` and use only the synthetic
-documents shipped with this repository. Reusable metric functions cover
-Recall@K, MRR, NDCG@5, citation validity, citation coverage, abstention, and
-document-comparison citation namespaces.
+Evaluation data under `data/evaluation/` is versioned JSON. Retrieval examples
+provide a query and relevant chunk IDs and/or document IDs; any supplied IDs
+must resolve to the connected, indexed corpus before the example is scored.
+The answer-observation dataset contains explicit abstention expectations but
+does not contain judged reference answers.
 
-Run the complete evaluation entry point:
+Run the workflow from the repository root:
 
 ```powershell
-python scripts/run_all_evaluations.py
+python scripts/run_evaluation.py
 ```
 
-The workflow records configuration and writes
-`reports/evaluation_report.json` and `reports/evaluation_report.md`. Retrieval
-and RAG benchmarks require MongoDB with indexed chunks. If MongoDB is
-unavailable, experiments are reported as **NOT RUN**, never as zero-quality
-results. Automated citation metrics measure provenance and formatting, not
-legal correctness; substantive grounding requires human review.
+Optional focused modes:
+
+```powershell
+python scripts/run_evaluation.py --retrieval-only
+python scripts/run_evaluation.py --answers-only
+```
+
+The legacy commands `scripts/run_all_evaluations.py`,
+`scripts/evaluate_retrieval.py`, `scripts/evaluate_rag.py`, and
+`scripts/generate_evaluation_report.py` delegate to this same runner. None
+creates a report by inserting placeholder metric values.
+
+Retrieval needs a reachable MongoDB instance with the indexed synthetic corpus
+and the project's configured embedding/retrieval dependencies. Answer
+observations run the bounded LangGraph `/api/chat` workflow; the default
+`LLM_PROVIDER=stub` permits deterministic plumbing observations but blocks
+semantic answer-quality evaluation. To test a real provider, configure a
+supported `LLM_PROVIDER` (`openai`, `openai-compatible`, or `openrouter`),
+`LLM_MODEL`, and the matching provider API key. OpenRouter uses
+`LLM_PROVIDER=openrouter`, `LLM_MODEL=openrouter/free`, and
+`OPENROUTER_API_KEY`. Live provider output and approximate vector search remain
+sources of nondeterminism.
+
+The command records the UTC run time, dataset version/count/SHA-256, provider
+and model configuration, retrieval parameters, request latencies, failures,
+empty results, abstentions, inline citation-ID resolution, and citation
+identifier/provenance validity. Retrieval Recall@k is the fraction of
+dataset-labeled relevant chunks/documents found in the first k results; MRR and
+NDCG@5 use those same relevance labels. Invalid or absent labels are skipped
+or block scoring rather than becoming misses. A missing MongoDB, empty dataset,
+or absent indexed labels produces `NOT RUN` or `BLOCKED`, not numeric zero
+benchmark results.
+
+Citation checks verify source-ID format, response citation mapping, and
+membership of each citation's document/chunk pair in evidence returned to the
+answer workflow. They do **not** verify that evidence semantically supports a
+legal claim. Required-term checks, where provided by a dataset, are literal
+string checks only. Answer correctness, groundedness, document analysis, and
+document comparison are not scored by this runner without judged references
+and an explicitly identified evaluator; they are reported as blocked or not
+run. Ordinary unit tests verify implementation behavior, not legal answer
+quality.
+
+The command writes `reports/evaluation_report.json` and
+`reports/evaluation_report.md`; the development dashboard at `/evaluation`
+shows only values present in that report.
 
 The development dashboard is available at `/evaluation`.
 
@@ -264,13 +363,18 @@ The development dashboard is available at `/evaluation`.
 
 ### Stage 3: RRF Fusion
 1. Results from both retrievers are merged using Reciprocal Rank Fusion.
-2. Duplicate chunks (appearing in both lists) get combined scores.
-3. The fused list is sorted by RRF score.
+2. Each rank contributes its configured source weight divided by `RRF_K + rank`; the default weights are `0.6` dense and `0.4` BM25.
+3. A chunk appearing in both lists is deduplicated and receives both contributions; duplicate appearances within one list count only once.
+4. The fused list is sorted by weighted RRF score, with document ID and chunk ID as deterministic tie-breakers.
 
 ### Stage 4: Cross-Encoder Reranking
-1. The top `rerank_top_k` (default 10) candidates are re-scored using a cross-encoder model.
-2. Each `(query, chunk)` pair is processed jointly for more accurate relevance.
-3. Final `final_top_k` (default 5) results are returned.
+1. Reranking is enabled only when `RERANKER_PROVIDER=cross_encoder` and `RERANKER_MODEL` is set; otherwise fused order is retained.
+2. The top `rerank_top_k` (default 10) candidates are re-scored using the configured cross-encoder model.
+3. Each `(query, chunk)` pair is processed jointly.
+4. Final results preserve source-document, chunk, section, page, and source-reference metadata.
+
+### Context Assembly for Answers
+The RAG service passes retrieved results to `EvidenceSelector`, which applies the configured minimum rerank score, maximum evidence chunk count, and approximate context-token limit. If all candidates fall below the score threshold, the current selector warns and uses the top candidates anyway. Selected chunks receive stable `[SOURCE N]` IDs; `ContextBuilder` includes their text and available document/section/page/source metadata in the prompt.
 
 ### Fallback Behaviour
 - If MongoDB is unavailable: empty results (API stays up).
@@ -312,8 +416,8 @@ All routes are available under both `/api` and `/api/v1`:
 | `KEYWORD_TOP_K` | `20` | Candidates from BM25 search |
 | `RERANK_TOP_K` | `10` | Candidates sent to reranker |
 | `FINAL_TOP_K` | `5` | Final results returned |
-| `VECTOR_WEIGHT` | `0.6` | Weight for vector results (weighted fusion fallback) |
-| `KEYWORD_WEIGHT` | `0.4` | Weight for keyword results (weighted fusion fallback) |
+| `VECTOR_WEIGHT` | `0.6` | Dense/vector contribution to weighted RRF |
+| `KEYWORD_WEIGHT` | `0.4` | BM25/lexical contribution to weighted RRF |
 | `RRF_K` | `60` | RRF constant — higher = less emphasis on top ranks |
 
 ### Reranker
@@ -330,10 +434,21 @@ LLM receives retrieved documents as untrusted data, and the backend resolves
 `SOURCE N` references back to actual chunk metadata before returning citations.
 Questions without sufficient evidence are answered with an explicit abstention.
 
+Citation verification is deterministic and limited to provenance: inline
+`[SOURCE N]` references must be canonical, must have been supplied in the
+selected evidence, and must resolve to a non-empty retrieved chunk tied to an
+existing stored document. Returned document/chunk IDs and location metadata are
+server-derived. This check does not prove that a passage semantically entails
+or legally supports every sentence or claim; no such entailment evaluation is
+implemented.
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `LLM_PROVIDER` | `stub` | `stub` for deterministic development or `openai` |
+| `LLM_PROVIDER` | `stub` | `stub`, `openai`, or `openrouter` |
 | `LLM_MODEL` | `placeholder` | Provider-specific model name |
+| `OPENAI_API_KEY` | unset | Required when `LLM_PROVIDER=openai` |
+| `OPENROUTER_API_KEY` | unset | Required when `LLM_PROVIDER=openrouter` |
+| `LLM_BASE_URL` | unset | Optional endpoint for an OpenAI-compatible service |
 | `LLM_TEMPERATURE` | `0.3` | Generation temperature |
 | `LLM_MAX_TOKENS` | `2048` | Maximum generated tokens |
 | `MAX_EVIDENCE_CHUNKS` | `8` | Maximum evidence passages supplied to the LLM |
@@ -344,14 +459,37 @@ Confidence is rule-based: high confidence requires valid citations and strong
 retrieval evidence; otherwise the response is medium or low. This is not a
 measure of legal correctness.
 
+The default `stub` provider returns clearly labeled mock output; it is not real
+legal-answer generation. To use OpenAI, configure `LLM_PROVIDER=openai`,
+`LLM_MODEL=<your model>`, and `OPENAI_API_KEY=<your key>`. To use OpenRouter,
+configure `LLM_PROVIDER=openrouter`, `LLM_MODEL=openrouter/free`, and
+`OPENROUTER_API_KEY=<your key>`. OpenRouter requests use
+`https://openrouter.ai/api/v1` through the existing OpenAI SDK integration;
+`LLM_BASE_URL` is not required for this provider. The chat response includes
+`generation_mode` so clients can distinguish generated output from the stub,
+evidence-only fallback, and abstention. Provider failures do not switch to the
+stub; the workflow records generation failure and abstains.
+
 ### Controlled LangGraph workflow
 
-The chat route now runs a bounded workflow: query analysis, retrieval strategy
-selection, retrieval, deterministic evidence evaluation, optional one-time
-query refinement, grounded generation, and citation validation. Retrieval is
-limited by `MAX_RETRIEVAL_ATTEMPTS`; failed or insufficient paths abstain rather
-than asking the LLM to invent an answer. This is a controlled workflow, not an
-unrestricted autonomous agent.
+The chat route runs `analyze_query → select_retrieval_strategy →
+retrieve_evidence → evaluate_evidence`. Sufficient evidence continues through
+`generate_answer → validate_answer → finalize`; otherwise, retrieval can be
+broadened once and evaluated again before `abstain`. The configured
+`MAX_RETRIEVAL_ATTEMPTS` controls this count, with a hard graph ceiling of two
+total attempts. Retrieval and generation errors are recorded as safe workflow
+status and lead to bounded retry or abstention. Citation references are
+validated in the answer and key points (not merely in the model's JSON citation
+metadata) before the generated answer is accepted. If generation is unavailable,
+the RAG service may return clearly labeled `evidence_only` passages; invalid
+structured output or failed citation checks abstain.
+
+The checked-in default is `LLM_PROVIDER=stub`. Stub output is deterministic mock
+content and is not real legal analysis. The chat response's `generation_mode`
+identifies `stub`, `openai-compatible`, `openrouter`, `evidence_only`, `failed`,
+or `not_run`.
+The repository tests mock the provider and do not constitute a live LLM
+integration test.
 
 ### Embeddings
 
@@ -367,7 +505,14 @@ unrestricted autonomous agent.
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DATABASE_URL` | `mongodb://localhost:27017/pramaan` | MongoDB connection string |
+| `COMPOSE_DATABASE_URL` | `mongodb://db:27017/pramaan` | API-container URI used by Docker Compose |
+| `DATABASE_NAME` | `pramaan` | Database name for local indexing |
 | `ATLAS_VECTOR_SEARCH` | `false` | Enable MongoDB Atlas vector search |
+| `CORS_ORIGINS` | `http://localhost:3000` | Comma-separated exact browser origins |
+| `MAX_UPLOAD_SIZE_MB` | `25` | Maximum file payload accepted by upload/process endpoints |
+| `MAX_REQUEST_BODY_MB` | `30` | Maximum complete POST/PUT/PATCH body |
+| `RATE_LIMIT_REQUESTS` | `60` | Per-client in-process request limit |
+| `RATE_LIMIT_WINDOW_SECONDS` | `60` | Rate-limit window |
 
 ---
 
@@ -404,12 +549,12 @@ frontend/
 scripts/
   process_documents.py   Raw → cleaned chunks → JSONL
   index_documents.py     JSONL → embeddings → MongoDB
-  evaluate_retrieval.py  Vector vs Hybrid vs Hybrid+Reranker comparison
+  run_evaluation.py      Dataset-driven retrieval/answer observations
 
 data/
   raw/sample/         Synthetic sample documents
   processed/          JSONL output from process_documents.py
-  evaluation/         24 evaluation queries (5 categories)
+  evaluation/         Versioned relevance and abstention datasets
 ```
 
 ---
@@ -417,19 +562,27 @@ data/
 ## Running Tests
 
 ```powershell
-# Unit tests (no DB required)
-pytest backend/tests -q
+# Unit/integration tests (MongoDB-specific tests skip unless opted in)
+python -m pytest backend/tests -q
 
-# With MongoDB retrieval tests
+# Optional: use a dedicated disposable test database. Tests drop their test
+# collections during cleanup; never point this at an application database.
 $env:TEST_DATABASE_URL = "mongodb://localhost:27017/pramaan_test"
-pytest backend/tests -v
+python -m pytest backend/tests/test_retrieval.py -v
 
-# Specific test modules
-pytest backend/tests/test_keyword_retrieval.py -v
-pytest backend/tests/test_hybrid_retrieval.py -v
-pytest backend/tests/test_reranking.py -v
-pytest backend/tests/test_fallbacks.py -v
+# Frontend request/response contract checks and production build
+Set-Location frontend
+npm ci
+npm run test:api
+npx tsc --noEmit
+npm run build
 ```
+
+The backend test fixture redirects `DATABASE_URL` to `TEST_DATABASE_URL`, or
+to an intentionally unavailable local test URI when the opt-in variable is
+unset. It does not use a developer's configured application database by
+default. CI runs backend tests without `TEST_DATABASE_URL` (MongoDB-dependent
+tests are skipped), plus frontend API tests and a production build.
 
 ---
 
@@ -446,7 +599,17 @@ The API container runs as a non-root user and exposes a liveness healthcheck.
 
 ## Current production-readiness limits
 
-Authentication and authorization are intentionally not included yet. Place the
-API behind an authenticated gateway before exposing it publicly. MongoDB and
-external LLM/model services are required for complete end-to-end verification;
-local tests use stubs or skip infrastructure-dependent checks.
+No authentication/authorization or per-user document isolation exists. Routes
+for upload, list, metadata, analysis, document questions, comparison, and
+search are public unless an external gateway protects them. Do not expose the
+API to untrusted networks or process private legal documents until access
+controls are implemented and tested.
+
+GitHub Actions runs verification only; there is no automated deployment
+workflow. Docker Compose is a local development setup, not a hardened
+production deployment. The checked-in evaluation report records retrieval
+as blocked because its source labels do not resolve in the indexed corpus,
+marks semantic answer quality blocked because the provider is `stub` and
+there are no judged references, and does not run document analysis/comparison
+evaluation. See `reports/evaluation_report.md` for its timestamp and measured
+operational observations.

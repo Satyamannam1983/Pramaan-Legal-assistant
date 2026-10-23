@@ -8,7 +8,9 @@ from app.evaluation.schemas import RetrievalMetrics
 
 
 def recall_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
-    return float(bool(relevant.intersection(retrieved[:k]))) if relevant else 0.0
+    if k <= 0:
+        raise ValueError("k must be positive.")
+    return len(relevant.intersection(retrieved[:k])) / len(relevant) if relevant else 0.0
 
 
 def reciprocal_rank(retrieved: list[str], relevant: set[str]) -> float:
@@ -33,10 +35,9 @@ def ndcg_at_k(retrieved: list[str], relevant: set[str], k: int) -> float:
 def evaluate_rankings(rows: Iterable[tuple[list[str], set[str]]]) -> RetrievalMetrics:
     rows = list(rows)
     if not rows:
-        return RetrievalMetrics(
-            recall_at_1=0.0, recall_at_3=0.0, recall_at_5=0.0,
-            recall_at_10=0.0, mrr=0.0, ndcg_at_5=0.0, count=0,
-        )
+        raise ValueError("Cannot compute retrieval metrics without labeled examples.")
+    if any(not relevant for _, relevant in rows):
+        raise ValueError("Every ranking row must contain at least one relevance label.")
     return RetrievalMetrics(
         recall_at_1=sum(recall_at_k(r, g, 1) for r, g in rows) / len(rows),
         recall_at_3=sum(recall_at_k(r, g, 3) for r, g in rows) / len(rows),

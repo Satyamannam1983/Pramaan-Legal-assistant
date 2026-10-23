@@ -90,7 +90,10 @@ async def check_connection() -> bool:
         await get_client().admin.command("ping")
         return True
     except Exception as exc:  # noqa: BLE001
-        logger.warning("MongoDB health check failed: %s", exc)
+        logger.warning(
+            "MongoDB health check failed (error_type=%s).",
+            type(exc).__name__,
+        )
         return False
 
 

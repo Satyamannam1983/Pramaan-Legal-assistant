@@ -143,6 +143,8 @@ class BM25Index:
 
         Returns top_k results sorted by descending BM25 score.
         """
+        if top_k <= 0:
+            raise ValueError("top_k must be positive.")
         if self._n_docs == 0:
             return []
 
@@ -188,7 +190,13 @@ class BM25Index:
                 scores.append((doc_idx, score))
 
         # Sort by score descending
-        scores.sort(key=lambda x: x[1], reverse=True)
+        scores.sort(
+            key=lambda x: (
+                -x[1],
+                self._metadata[x[0]].get("document_id", ""),
+                self._chunk_ids[x[0]],
+            )
+        )
 
         results: list[KeywordResult] = []
         for rank, (doc_idx, bm25_score) in enumerate(scores[:top_k], start=1):
@@ -223,23 +231,25 @@ class KeywordRetriever:
     """
 
     def __init__(self, top_k: int | None = None) -> None:
-        self._default_top_k = top_k or settings.keyword_top_k
+        self._default_top_k = top_k if top_k is not None else settings.keyword_top_k
+        if self._default_top_k <= 0:
+            raise ValueError("top_k must be positive.")
         self._index: BM25Index | None = None
         self._indexed_chunk_count: int = -1
 
     async def _ensure_index(self) -> BM25Index:
         """Build or return the cached BM25 index."""
-        if self._index is not None:
-            return self._index
-
         if not await check_connection():
             raise RuntimeError("MongoDB is unavailable for keyword index build.")
 
         repo = DocumentRepository()
         total_chunks = await repo.count_chunks()
+        if self._index is not None and total_chunks == self._indexed_chunk_count:
+            return self._index
 
         if total_chunks == 0:
             self._index = BM25Index()
+            self._indexed_chunk_count = 0
             return self._index
 
         # Fetch all chunks with their document titles
@@ -276,7 +286,8 @@ class KeywordRetriever:
         docs = await doc_cursor.to_list(length=None)
         title_map: dict[str, str | None] = {d["document_id"]: d.get("title") for d in docs}
 
-        # Enrich chunks with titles
+        # Exclude orphan chunks so citations always refer to a stored source document.
+        chunks = [chunk for chunk in chunks if chunk["document_id"] in title_map]
         for chunk in chunks:
             chunk["title"] = title_map.get(chunk["document_id"])
 
@@ -306,6 +317,8 @@ class KeywordRetriever:
             raise ValueError("Query must not be empty.")
 
         k = top_k if top_k is not None else self._default_top_k
+        if k <= 0:
+            raise ValueError("top_k must be positive.")
 
         index = await self._ensure_index()
         return index.search(query, top_k=k, document_id=document_id)

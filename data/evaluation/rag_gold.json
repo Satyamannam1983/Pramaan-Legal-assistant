@@ -1,4 +1,24 @@
-[
-  {"id":"r001","query":"What is the distinction between murder and culpable homicide?","requires_abstention":false,"category":"answerable"},
-  {"id":"r002","query":"What environmental clearance is required for mining operations in Goa?","requires_abstention":true,"category":"insufficient_evidence"}
-]
+{
+  "name": "pramaan-abstention-observations",
+  "version": "1",
+  "provenance": "Project-maintained expected-abstention observations; the dataset contains no judged reference answers and supports no semantic answer-correctness score.",
+  "examples": [
+    {
+      "id": "a001",
+      "query": "What is the distinction between murder and culpable homicide?",
+      "category": "answerable",
+      "expected_answer": {
+        "expected_abstention": false,
+        "expected_citation_document_ids": ["sample_judgment"]
+      }
+    },
+    {
+      "id": "a002",
+      "query": "What environmental clearance is required for mining operations in Goa?",
+      "category": "insufficient_evidence",
+      "expected_answer": {
+        "expected_abstention": true
+      }
+    }
+  ]
+}

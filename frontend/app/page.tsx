@@ -1,434 +1,576 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { AppShell } from "../components/AppShell";
-import { API_URL as API_BASE } from "../lib/api";
+import { PageHeader } from "../components/PageHeader";
+import { buildFollowUpPrompts } from "../lib/follow-up";
+import {
+  askDocument,
+  askQuestion,
+  compareDocuments,
+  getErrorMessage,
+  listDocuments,
+  safeSourceUrl,
+  uploadDocument,
+  type ChatResponse,
+  type ComparisonCitation,
+  type DocumentComparisonResponse,
+  type DocumentSummary,
+  type SearchResult,
+  type CitationRef,
+  type UploadResponse,
+} from "../lib/api";
 
-const examples = [
-  "What are the essential elements of a valid contract under Indian law?",
-  "What are the remedies available for breach of contract?",
-  "What is the difference between murder and culpable homicide?",
-  "What does Section 302 IPC provide?",
-];
-
-type CitationRef = {
-  citation_id: string;
-  chunk_id: string;
-  document_id: string;
-  title: string | null;
-  section: string | null;
-  page_start: number | null;
-  page_end: number | null;
-  source_url: string | null;
-  relevant_quote: string | null;
-};
-
-type ChatResponse = {
+type WorkspaceMode = "general" | "document" | "compare";
+type Citation = CitationRef | ComparisonCitation;
+type ChatTurn = {
+  id: string;
+  question: string;
   answer: string;
-  key_points: string[];
-  citations: CitationRef[];
+  citations: Citation[];
+  sources: SearchResult[];
+  abstained: boolean;
   limitations: string[];
-  confidence: string;
-  conversation_id: string;
-  retrieval_attempts: number;
-  strategies: string[];
+  mode: WorkspaceMode;
 };
 
-type SearchResult = {
-  chunk_id: string;
-  content: string;
-  document_id: string;
-  title: string | null;
-  section: string | null;
-  page_start: number | null;
-  page_end: number | null;
-  document_type: string | null;
-  court: string | null;
-  date: string | null;
-  source: string | null;
-  source_url: string | null;
-  vector_score: number;
-  keyword_score: number;
-  rrf_score: number;
-  rerank_score: number;
-  final_rank: number | null;
-};
+function makeComparisonAnswer(result: DocumentComparisonResponse): string {
+  const sections = [
+    result.overview,
+    result.similarities.length ? `Similarities\n${result.similarities.map((item) => `- ${item}`).join("\n")}` : "",
+    result.differences.length ? `Differences\n${result.differences.map((item) => `- ${item}`).join("\n")}` : "",
+    result.legal_provisions.length ? `Legal provisions\n${result.legal_provisions.map((item) => `- ${item}`).join("\n")}` : "",
+    result.reasoning_comparison.length ? `Reasoning comparison\n${result.reasoning_comparison.map((item) => `- ${item}`).join("\n")}` : "",
+    result.outcome_comparison ? `Outcome\n${result.outcome_comparison}` : "",
+  ];
+  return sections.filter(Boolean).join("\n\n");
+}
 
-type SearchResponse = {
-  query: string;
-  results: SearchResult[];
-};
+function AnswerContent({ answer }: { answer: string }) {
+  const lines = answer.split(/\r?\n/);
+  const blocks: Array<{ type: "paragraph" | "heading" | "ul" | "ol"; content: string[] }> = [];
 
-export default function Home() {
-  const [query, setQuery] = useState("");
-  const [loading, setLoading] = useState(false);
-  const [chatResponse, setChatResponse] = useState<ChatResponse | null>(null);
-  const [searchResponse, setSearchResponse] = useState<SearchResponse | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"answer" | "evidence">("answer");
-
-  const handleSearch = async (q: string) => {
-    const trimmed = q.trim();
-    if (!trimmed) return;
-    setQuery(trimmed);
-    setLoading(true);
-    setError(null);
-    setChatResponse(null);
-    setSearchResponse(null);
-
-    try {
-      // Run both chat and search in parallel
-      const [chatRes, searchRes] = await Promise.allSettled([
-        fetch(`${API_BASE}/chat`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: trimmed }),
-        }),
-        fetch(`${API_BASE}/search`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ query: trimmed, top_k: 5 }),
-        }),
-      ]);
-
-      // Handle chat response
-      if (chatRes.status === "fulfilled" && chatRes.value.ok) {
-        const data: ChatResponse = await chatRes.value.json();
-        setChatResponse(data);
-      }
-
-      // Handle search response
-      if (searchRes.status === "fulfilled" && searchRes.value.ok) {
-        const data: SearchResponse = await searchRes.value.json();
-        setSearchResponse(data);
-      }
-
-      // Check for errors
-      if (chatRes.status === "fulfilled" && !chatRes.value.ok) {
-        const detail = await chatRes.value.json().catch(() => ({ detail: chatRes.value.statusText }));
-        setError(detail.detail || "Chat request failed");
-      } else if (chatRes.status === "rejected") {
-        setError("Could not connect to the API. Is the backend running?");
-      }
-    } catch (err) {
-      setError("Could not connect to the API. Is the backend running?");
-    } finally {
-      setLoading(false);
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    const heading = trimmed.match(/^#{1,3}\s+(.+)$/);
+    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
+    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
+    if (heading) {
+      blocks.push({ type: "heading", content: [heading[1]] });
+    } else if (unordered || ordered) {
+      const type = unordered ? "ul" : "ol";
+      const value = (unordered ?? ordered)?.[1] ?? trimmed;
+      const last = blocks[blocks.length - 1];
+      if (last?.type === type) last.content.push(value);
+      else blocks.push({ type, content: [value] });
+    } else {
+      const last = blocks[blocks.length - 1];
+      if (last?.type === "paragraph") last.content.push(trimmed);
+      else blocks.push({ type: "paragraph", content: [trimmed] });
     }
-  };
-
-  const confidenceColor = (c: string) => {
-    if (c === "high") return "text-emerald-700 bg-emerald-50 border-emerald-200";
-    if (c === "medium") return "text-amber-700 bg-amber-50 border-amber-200";
-    return "text-slate-600 bg-slate-50 border-slate-200";
-  };
-
-  const rerankColor = (score: number) => {
-    if (score >= 0.75) return "text-emerald-600 bg-emerald-50";
-    if (score >= 0.50) return "text-amber-600 bg-amber-50";
-    return "text-slate-500 bg-slate-100";
-  };
+  }
 
   return (
-    <AppShell eyebrow="Legal research">
-    <main className="min-h-screen bg-slate-50">
-      {/* Header */}
-      <div className="mx-auto max-w-5xl px-6 py-10">
-        {/* Search card */}
-        <div className="rounded-2xl bg-slate-900 p-6 text-white shadow-sm">
-          <p className="text-sm font-medium text-teal-400">Legal Research Assistant</p>
-          <h1 className="mt-2 text-xl font-medium">
-            Ask a legal question
-          </h1>
-          <p className="mt-1 text-xs text-slate-400">
-            Hybrid retrieval + grounded LLM with verified citations
-          </p>
-          <div className="mt-5 flex gap-3">
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleSearch(query)}
-              placeholder="What are the essential requirements for a valid contract?"
-              className="min-w-0 flex-1 rounded-lg border border-white/20 bg-white/10 px-4 py-3 text-sm outline-none placeholder:text-slate-400 focus:border-amber-400"
-            />
-            <button
-              onClick={() => handleSearch(query)}
-              disabled={loading}
-              className="rounded-lg bg-amber-400 px-5 py-3 text-sm font-semibold text-slate-900 disabled:opacity-50"
-            >
-              {loading ? "Researching..." : "Ask"}
-            </button>
-          </div>
-          <div className="mt-4 flex flex-wrap gap-2">
-            {examples.map((ex) => (
-              <button
-                key={ex}
-                onClick={() => handleSearch(ex)}
-                className="rounded-full border border-white/20 px-3 py-1 text-xs text-slate-300 hover:border-amber-400 hover:text-amber-400"
-              >
-                {ex.length > 55 ? ex.slice(0, 52) + "..." : ex}
+    <div className="assistant-answer">
+      {blocks.map((block, index) => {
+        if (block.type === "heading") return <h3 key={index}>{block.content[0]}</h3>;
+        if (block.type === "ul" || block.type === "ol") {
+          const List = block.type === "ul" ? "ul" : "ol";
+          return <List key={index}>{block.content.map((item, itemIndex) => <li key={itemIndex}>{formatInline(item)}</li>)}</List>;
+        }
+        return <p key={index}>{formatInline(block.content.join(" "))}</p>;
+      })}
+    </div>
+  );
+}
+
+function formatInline(text: string) {
+  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
+    part.startsWith("**") && part.endsWith("**")
+      ? <strong key={index}>{part.slice(2, -2)}</strong>
+      : part
+  );
+}
+
+function AssistantMark() {
+  return (
+    <span className="message-avatar" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+        <path d="M12 3v17M7 21h10M5 6h14M5 6l-3 7h6L5 6ZM19 6l-3 7h6l-3-7Z" />
+        <path d="M2 13a3 3 0 0 0 6 0M16 13a3 3 0 0 0 6 0" />
+      </svg>
+    </span>
+  );
+}
+
+function CitationIcon() {
+  return (
+    <svg className="citation-open-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M14 4h6v6M20 4l-9 9" />
+      <path d="M18 13v5a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h5" />
+    </svg>
+  );
+}
+
+function citationTitle(citation: Citation, documents: DocumentSummary[]) {
+  if ("title" in citation && citation.title) return citation.title;
+  return documents.find((doc) => doc.document_id === citation.document_id)?.title
+    || citation.document_id;
+}
+
+function citationHref(citation: Citation) {
+  if ("source_url" in citation) return safeSourceUrl(citation.source_url);
+  return null;
+}
+
+function citationsDestination(citation: Citation) {
+  return `/documents/${encodeURIComponent(citation.document_id)}`;
+}
+
+export default function Home() {
+  const [mode, setMode] = useState<WorkspaceMode>("general");
+  const [query, setQuery] = useState("");
+  const [selectedDocument, setSelectedDocument] = useState("");
+  const [comparisonDocuments, setComparisonDocuments] = useState<[string, string]>(["", ""]);
+  const [documents, setDocuments] = useState<DocumentSummary[]>([]);
+  const [documentsLoading, setDocumentsLoading] = useState(true);
+  const [documentsError, setDocumentsError] = useState("");
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
+  const [pendingQuestion, setPendingQuestion] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [activeCitationTab, setActiveCitationTab] = useState<"citations" | "sources">("citations");
+  const [conversationId, setConversationId] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [uploadMessage, setUploadMessage] = useState("");
+  const [uploadError, setUploadError] = useState("");
+  const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
+  const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const requestController = useRef<AbortController | null>(null);
+  const uploadController = useRef<AbortController | null>(null);
+  const fileInput = useRef<HTMLInputElement | null>(null);
+  const questionInput = useRef<HTMLTextAreaElement | null>(null);
+  const chatScroll = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listDocuments(controller.signal)
+      .then((items) => {
+        if (!controller.signal.aborted) {
+          setDocuments(items);
+          setSelectedDocument(items[0]?.document_id ?? "");
+        }
+      })
+      .catch((failure: unknown) => {
+        if (!controller.signal.aborted) setDocumentsError(getErrorMessage(failure));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setDocumentsLoading(false);
+      });
+    return () => {
+      controller.abort();
+      requestController.current?.abort();
+      uploadController.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (chatScroll.current) chatScroll.current.scrollTop = chatScroll.current.scrollHeight;
+  }, [turns, pendingQuestion]);
+
+  async function submitQuestion(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const trimmed = query.trim();
+    if (!trimmed || loading || mode === "compare") return;
+    if (mode === "document" && !selectedDocument) {
+      setError("Choose an indexed document before asking a document-specific question.");
+      return;
+    }
+
+    requestController.current?.abort();
+    const controller = new AbortController();
+    requestController.current = controller;
+    setLoading(true);
+    setPendingQuestion(trimmed);
+    setError("");
+
+    try {
+      const response: ChatResponse = mode === "document"
+        ? await askDocument(selectedDocument, { query: trimmed }, controller.signal)
+        : await askQuestion({ query: trimmed, conversation_id: conversationId }, controller.signal);
+      if (requestController.current !== controller) return;
+      setQuery("");
+      if (mode === "general") setConversationId(response.conversation_id);
+      setTurns((current) => [
+        ...current,
+        {
+          id: `${response.conversation_id}:${current.length}`,
+          question: trimmed,
+          answer: response.answer,
+          citations: response.citations,
+          sources: response.search_results,
+          abstained: response.abstained,
+          limitations: response.limitations,
+          mode,
+        },
+      ]);
+      setActiveCitationTab("citations");
+    } catch (failure) {
+      if (!controller.signal.aborted && requestController.current === controller) {
+        setError(getErrorMessage(failure));
+      }
+    } finally {
+      if (requestController.current === controller) {
+        requestController.current = null;
+        setPendingQuestion("");
+        setLoading(false);
+      }
+    }
+  }
+
+  async function runComparison() {
+    const [first, second] = comparisonDocuments;
+    if (!first || !second || first === second || loading) return;
+    const firstTitle = documents.find((doc) => doc.document_id === first)?.title || first;
+    const secondTitle = documents.find((doc) => doc.document_id === second)?.title || second;
+    const controller = new AbortController();
+    requestController.current?.abort();
+    requestController.current = controller;
+    setLoading(true);
+    setPendingQuestion(`Compare ${firstTitle} and ${secondTitle}`);
+    setError("");
+    try {
+      const result = await compareDocuments({ document_ids: [first, second] }, controller.signal);
+      if (requestController.current !== controller) return;
+      setTurns((current) => [
+        ...current,
+        {
+          id: `comparison:${current.length}`,
+          question: `Compare ${firstTitle} and ${secondTitle}`,
+          answer: makeComparisonAnswer(result),
+          citations: result.citations,
+          sources: [],
+          abstained: false,
+          limitations: result.limitations,
+          mode: "compare",
+        },
+      ]);
+      setActiveCitationTab("citations");
+    } catch (failure) {
+      if (!controller.signal.aborted && requestController.current === controller) {
+        setError(getErrorMessage(failure));
+      }
+    } finally {
+      if (requestController.current === controller) {
+        requestController.current = null;
+        setPendingQuestion("");
+        setLoading(false);
+      }
+    }
+  }
+
+  async function uploadAttachment(file: File) {
+    setAttachedFile(file);
+    setUploadMessage("");
+    setUploadError("");
+    setUploadResult(null);
+    const controller = new AbortController();
+    uploadController.current?.abort();
+    uploadController.current = controller;
+    setUploading(true);
+    try {
+      const result = await uploadDocument(file, controller.signal);
+      if (uploadController.current !== controller) return;
+      setUploadResult(result);
+      if (result.indexing_status === "indexed") {
+        setUploadMessage(`${result.filename} is uploaded and indexed. Ask your question about it below.`);
+        if (result.document_id) {
+          setSelectedDocument(result.document_id);
+          setMode("document");
+        }
+        try {
+          const refreshed = await listDocuments(controller.signal);
+          if (uploadController.current === controller) setDocuments(refreshed);
+        } catch {
+          if (!controller.signal.aborted && uploadController.current === controller) {
+            setUploadMessage(`${result.filename} was uploaded and indexed, but the document list could not be refreshed.`);
+          }
+        }
+      } else {
+        setUploadMessage(`${result.filename} was uploaded, but indexing is ${result.indexing_status}. It may not be available for retrieval.`);
+      }
+      setAttachedFile(null);
+      if (fileInput.current) fileInput.current.value = "";
+    } catch (failure) {
+      if (!controller.signal.aborted && uploadController.current === controller) {
+        setUploadError(getErrorMessage(failure));
+      }
+    } finally {
+      if (uploadController.current === controller) {
+        uploadController.current = null;
+        setUploading(false);
+      }
+    }
+  }
+
+  const latest = turns[turns.length - 1];
+  const latestCitations = latest?.citations ?? [];
+  const latestSources = latest?.sources ?? [];
+  const citationMode = activeCitationTab === "citations";
+
+  function changeMode(nextMode: WorkspaceMode) {
+    setMode(nextMode);
+    setError("");
+  }
+
+  function useFollowUp(prompt: { documentId: string; query: string }) {
+    setSelectedDocument(prompt.documentId);
+    setMode("document");
+    setQuery(prompt.query);
+    setError("");
+    requestAnimationFrame(() => questionInput.current?.focus());
+  }
+
+  return (
+    <AppShell>
+      <main className="page-container assistant-page">
+        <PageHeader
+          eyebrow="Legal Assistant"
+          title="Legal Assistant"
+          description="Ask legal questions, analyze documents, and get AI-powered answers with verifiable citations."
+        />
+
+        <div className="chat-grid">
+          <section className="surface-panel chat-panel" aria-label="Legal assistant conversation">
+            <div className="chat-modebar" role="tablist" aria-label="Question type">
+              <button type="button" role="tab" aria-selected={mode === "general"} onClick={() => changeMode("general")} className={`mode-button${mode === "general" ? " mode-button-active" : ""}`}>
+                <svg className="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M5 4h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-5 3v-3H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Z" /><path d="M8 9h8M8 13h5" /></svg>
+                General Question
               </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Error */}
-        {error && (
-          <div className="mt-6 rounded-xl border border-red-200 bg-red-50 p-4 text-sm text-red-700">
-            <strong>Error:</strong> {error}
-          </div>
-        )}
-
-        {/* Loading */}
-        {loading && (
-          <div className="mt-8 text-center text-sm text-slate-500">
-            Retrieving evidence and generating answer...
-          </div>
-        )}
-
-        {/* Results */}
-        {chatResponse && !loading && (
-          <section className="mt-8 space-y-6">
-            {/* Tab bar */}
-            <div className="flex gap-1 border-b border-slate-200">
-              <button
-                onClick={() => setActiveTab("answer")}
-                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === "answer"
-                    ? "border-teal-500 text-teal-600"
-                    : "border-transparent text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                AI Answer
+              <button type="button" role="tab" aria-selected={mode === "document"} onClick={() => changeMode("document")} className={`mode-button${mode === "document" ? " mode-button-active" : ""}`}>
+                <svg className="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M6 3h8l4 4v14H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2Z" /><path d="M14 3v5h5M8 13h8M8 17h6" /></svg>
+                Ask About Document
               </button>
-              <button
-                onClick={() => setActiveTab("evidence")}
-                className={`px-4 py-2 text-sm font-medium border-b-2 transition-colors ${
-                  activeTab === "evidence"
-                    ? "border-teal-500 text-teal-600"
-                    : "border-transparent text-slate-500 hover:text-slate-700"
-                }`}
-              >
-                Evidence ({searchResponse?.results.length || 0})
+              <button type="button" role="tab" aria-selected={mode === "compare"} onClick={() => changeMode("compare")} className={`mode-button${mode === "compare" ? " mode-button-active" : ""}`}>
+                <svg className="mode-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><path d="M12 3v17M7 21h10M5 6h14M5 6l-3 7h6L5 6ZM19 6l-3 7h6l-3-7Z" /><path d="M2 13a3 3 0 0 0 6 0M16 13a3 3 0 0 0 6 0" /></svg>
+                Compare Documents
               </button>
             </div>
 
-            {/* AI Answer tab */}
-            {activeTab === "answer" && (
-              <div className="space-y-5">
-                {/* Confidence badge */}
-                <div className="flex items-center gap-3">
-                  <span className={`rounded-full border px-3 py-1 text-xs font-medium ${confidenceColor(chatResponse.confidence)}`}>
-                    Confidence: {chatResponse.confidence}
-                  </span>
-                  <span className="text-xs text-slate-400">
-                    {chatResponse.citations.length} source{chatResponse.citations.length !== 1 ? "s" : ""} cited
-                  </span>
-                  {chatResponse.retrieval_attempts > 0 && (
-                    <span className="text-xs text-slate-400">
-                      {chatResponse.retrieval_attempts} retrieval pass{chatResponse.retrieval_attempts !== 1 ? "es" : ""}
-                    </span>
-                  )}
-                </div>
-
-                {/* Answer */}
-                <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-                  <h2 className="text-sm font-medium text-slate-500 mb-3">Answer</h2>
-                  <div className="prose prose-sm max-w-none text-slate-700 leading-relaxed whitespace-pre-wrap">
-                    {chatResponse.answer}
-                  </div>
-                </div>
-
-                {/* Key Points */}
-                {chatResponse.key_points.length > 0 && (
-                  <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-                    <h2 className="text-sm font-medium text-slate-500 mb-3">Key Points</h2>
-                    <ul className="space-y-2">
-                      {chatResponse.key_points.map((point, i) => (
-                        <li key={i} className="flex items-start gap-2 text-sm text-slate-700">
-                          <span className="mt-1 h-1.5 w-1.5 flex-shrink-0 rounded-full bg-teal-500" />
-                          {point}
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
+            {mode !== "general" && (
+              <div className="chat-scope-controls">
+                {mode === "document" ? (
+                  <>
+                    <label className="sr-only" htmlFor="document-scope">Choose an indexed document</label>
+                    <select id="document-scope" className="select-input" value={selectedDocument} onChange={(event) => setSelectedDocument(event.target.value)} disabled={documentsLoading || loading}>
+                      <option value="">Choose an indexed document</option>
+                      {documents.map((doc) => <option key={doc.document_id} value={doc.document_id}>{doc.title || doc.document_id}</option>)}
+                    </select>
+                    <p className="helper-text" role={documentsError ? "alert" : undefined}>
+                      {documentsError || (documentsLoading ? "Loading indexed documents..." : `${documents.length} indexed document${documents.length === 1 ? "" : "s"} available`)}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    {([0, 1] as const).map((index) => (
+                      <div className="scope-select-field" key={index}>
+                        <label className="helper-text" htmlFor={`comparison-document-${index}`}>
+                          {index === 0 ? "First document" : "Second document"}
+                        </label>
+                        <select
+                          id={`comparison-document-${index}`}
+                          className="select-input"
+                          value={comparisonDocuments[index]}
+                          onChange={(event) => setComparisonDocuments((current) => index === 0 ? [event.target.value, current[1]] : [current[0], event.target.value])}
+                          disabled={documentsLoading || loading}
+                        >
+                          <option value="">{index === 0 ? "Select first document" : "Select second document"}</option>
+                          {documents.map((doc) => <option key={doc.document_id} value={doc.document_id}>{doc.title || doc.document_id}</option>)}
+                        </select>
+                      </div>
+                    ))}
+                    <div className="col-span-full flex flex-wrap items-center justify-between gap-2">
+                      <p className="helper-text">{documentsError || (documentsLoading ? "Loading indexed documents..." : "Choose two different indexed documents to compare.")}</p>
+                      <button type="button" className="neutral-button" onClick={runComparison} disabled={documentsLoading || loading || !comparisonDocuments[0] || !comparisonDocuments[1] || comparisonDocuments[0] === comparisonDocuments[1]}>
+                        {loading ? "Comparing..." : "Compare selected documents"}
+                      </button>
+                    </div>
+                  </>
                 )}
+              </div>
+            )}
 
-                {/* Citations */}
-                {chatResponse.citations.length > 0 && (
-                  <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
-                    <h2 className="text-sm font-medium text-slate-500 mb-3">Sources Cited</h2>
-                    <div className="space-y-3">
-                      {chatResponse.citations.map((cit, i) => (
-                        <div key={i} className="rounded-lg border border-slate-100 bg-slate-50 p-4">
-                          <div className="flex items-center gap-2 mb-2">
-                            <span className="rounded bg-teal-100 px-2 py-0.5 text-xs font-bold text-teal-700">
-                              {cit.citation_id}
-                            </span>
-                            <span className="font-medium text-sm text-slate-900">
-                              {cit.title || cit.document_id}
-                            </span>
-                          </div>
-                          {cit.section && (
-                            <p className="text-xs text-teal-600 mb-1">{cit.section}</p>
-                          )}
-                          <div className="flex flex-wrap gap-2 text-xs text-slate-400">
-                            {cit.page_start != null && (
-                              <span>Page {cit.page_start === cit.page_end ? cit.page_start : `${cit.page_start}–${cit.page_end}`}</span>
-                            )}
-                            {cit.source_url && (
-                              <a href={cit.source_url} target="_blank" rel="noopener noreferrer" className="text-teal-600 hover:underline">
-                                View source
-                              </a>
-                            )}
-                          </div>
-                          {cit.relevant_quote && (
-                            <blockquote className="mt-2 border-l-2 border-teal-300 pl-3 text-xs text-slate-600 italic">
-                              &ldquo;{cit.relevant_quote}&rdquo;
-                            </blockquote>
-                          )}
+            <div className="chat-scroll" ref={chatScroll} aria-live="polite">
+              {!turns.length && !pendingQuestion && (
+                <div className="chat-empty">
+                  <span className="chat-empty-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M12 3v17M7 21h10M5 6h14M5 6l-3 7h6L5 6ZM19 6l-3 7h6l-3-7Z" /><path d="M2 13a3 3 0 0 0 6 0M16 13a3 3 0 0 0 6 0" /></svg></span>
+                  <h2>Research with verifiable sources</h2>
+                  <p>Submit a question to retrieve evidence from indexed legal documents. Citations and related passages will appear alongside the answer.</p>
+                </div>
+              )}
+              {turns.map((turn) => {
+                const followUps = buildFollowUpPrompts(
+                  turn.citations.length ? turn.citations : turn.sources,
+                );
+                return <article className="chat-turn" key={turn.id}>
+                  <div className="user-message-row">
+                    <div className="user-message">{turn.question}</div>
+                  </div>
+                  <div className="assistant-message-row">
+                    <AssistantMark />
+                    <div className="assistant-message">
+                      <div className="assistant-message-meta">
+                        <span>Pramaan</span>
+                        <span>{turn.mode === "compare" ? "Document comparison" : turn.mode === "document" ? "Document-specific research" : "Legal research"}</span>
+                      </div>
+                      <AnswerContent answer={turn.answer} />
+                      {turn.abstained && <p className="insufficient-note">The system abstained because the available evidence was not sufficient to support a verified answer.</p>}
+                      {!turn.citations.length && !turn.sources.length && !turn.abstained && (
+                        <p className="insufficient-note">No citations or supporting passages were returned for this response.</p>
+                      )}
+                      {!!turn.limitations.length && <p className="message-limitations">{turn.limitations.join(" ")}</p>}
+                      {followUps.length > 0 && (
+                        <div className="follow-up-prompts" aria-label="Evidence-grounded follow-up questions">
+                          <p className="follow-up-heading">Ask about the cited document</p>
+                          {followUps.map((prompt) => (
+                            <button
+                              type="button"
+                              key={`${prompt.documentId}:${prompt.label}`}
+                              className="follow-up-button"
+                              onClick={() => useFollowUp(prompt)}
+                              disabled={loading}
+                            >
+                              {prompt.label}
+                            </button>
+                          ))}
                         </div>
-                      ))}
+                      )}
                     </div>
                   </div>
-                )}
-
-                {/* Limitations */}
-                {chatResponse.limitations.length > 0 && (
-                  <div className="rounded-xl border border-amber-200 bg-amber-50 p-5">
-                    <h2 className="text-sm font-medium text-amber-700 mb-2">Limitations</h2>
-                    <ul className="space-y-1">
-                      {chatResponse.limitations.map((lim, i) => (
-                        <li key={i} className="text-xs text-amber-600">{lim}</li>
-                      ))}
-                    </ul>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Evidence tab */}
-            {activeTab === "evidence" && searchResponse && (
-              <div className="space-y-4">
-                {searchResponse.results.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 bg-white p-8 text-center">
-                    <p className="text-slate-500">No evidence retrieved.</p>
-                  </div>
-                ) : (
-                  searchResponse.results.map((result, idx) => (
-                    <article
-                      key={result.chunk_id}
-                      className="rounded-xl border border-slate-200 bg-white p-5 shadow-sm"
-                    >
-                      <div className="flex items-start justify-between gap-4">
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-xs font-medium text-slate-400">
-                              #{result.final_rank || idx + 1}
-                            </span>
-                            {result.document_type && (
-                              <span className="rounded bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-600">
-                                {result.document_type}
-                              </span>
-                            )}
-                            {result.court && (
-                              <span className="rounded bg-blue-50 px-2 py-0.5 text-xs text-blue-700">
-                                {result.court}
-                              </span>
-                            )}
-                          </div>
-                          <h3 className="mt-1 font-semibold text-slate-900">
-                            {result.title || result.document_id}
-                          </h3>
-                          {result.section && (
-                            <p className="text-sm text-teal-700 font-medium mt-0.5">
-                              {result.section}
-                            </p>
-                          )}
-                        </div>
-                        <div className={`flex-shrink-0 rounded-lg px-3 py-1.5 text-center ${rerankColor(result.rerank_score)}`}>
-                          <div className="text-xs font-medium">Relevance</div>
-                          <div className="text-sm font-bold">
-                            {result.rerank_score > 0 && result.rerank_score <= 1
-                              ? (result.rerank_score * 100).toFixed(0) + "%"
-                              : result.rerank_score > 1
-                                ? result.rerank_score.toFixed(2)
-                                : "N/A"}
-                          </div>
-                        </div>
-                      </div>
-
-                      <blockquote className="mt-4 rounded-lg bg-slate-50 border-l-4 border-teal-400 px-4 py-3 text-sm text-slate-700 leading-relaxed">
-                        {result.content.length > 600
-                          ? result.content.slice(0, 597) + "..."
-                          : result.content}
-                      </blockquote>
-
-                      <details className="mt-3 group">
-                        <summary className="cursor-pointer text-xs text-slate-400 hover:text-slate-600 select-none">
-                          Why this result?
-                        </summary>
-                        <div className="mt-2 flex flex-wrap gap-3 text-xs">
-                          <span className="rounded bg-violet-50 px-2 py-1 text-violet-700">
-                            Vector: {(result.vector_score * 100).toFixed(1)}%
-                          </span>
-                          <span className="rounded bg-orange-50 px-2 py-1 text-orange-700">
-                            Keyword: {result.keyword_score.toFixed(2)}
-                          </span>
-                          <span className="rounded bg-cyan-50 px-2 py-1 text-cyan-700">
-                            RRF: {result.rrf_score.toFixed(4)}
-                          </span>
-                          <span className="rounded bg-emerald-50 px-2 py-1 text-emerald-700">
-                            Reranker: {result.rerank_score.toFixed(4)}
-                          </span>
-                        </div>
-                      </details>
-
-                      <footer className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-400">
-                        {result.page_start != null && (
-                          <span>
-                            Page {result.page_start === result.page_end
-                              ? result.page_start
-                              : `${result.page_start}–${result.page_end}`}
-                          </span>
-                        )}
-                        {result.date && <span>Date: {result.date}</span>}
-                        {result.source && (
-                          <span>
-                            Source:{" "}
-                            {result.source_url ? (
-                              <a href={result.source_url} target="_blank" rel="noopener noreferrer" className="text-teal-600 hover:underline">
-                                {result.source}
-                              </a>
-                            ) : (
-                              result.source
-                            )}
-                          </span>
-                        )}
-                        <span className="ml-auto font-mono text-slate-300">
-                          {result.chunk_id}
-                        </span>
-                      </footer>
-                    </article>
-                  ))
-                )}
-              </div>
-            )}
+                </article>
+              })}
+              {pendingQuestion && (
+                <article className="chat-turn">
+                  <div className="user-message-row"><div className="user-message">{pendingQuestion}</div></div>
+                  <div className="pending-message"><AssistantMark /><span>Retrieving evidence and preparing a response</span><span className="loading-dots" aria-label="Loading"><span /><span /><span /></span></div>
+                </article>
+              )}
+            </div>
           </section>
-        )}
 
-        {/* Empty state */}
-        {!chatResponse && !loading && !error && (
-          <div className="mt-10 rounded-xl border border-dashed border-slate-200 bg-white p-10 text-center">
-            <p className="text-slate-500">Ask a legal question to get a grounded answer with citations.</p>
-            <p className="mt-2 text-xs text-slate-400">
-              The system retrieves evidence from indexed legal documents, then generates an answer grounded in those sources.
-            </p>
+          <aside className="surface-panel citation-panel" aria-label="Sources for the latest response">
+            <div className="citation-tabs" role="tablist" aria-label="Evidence panel">
+              <button type="button" role="tab" aria-selected={citationMode} onClick={() => setActiveCitationTab("citations")} className={`citation-tab${citationMode ? " citation-tab-active" : ""}`}>
+                Citations ({latestCitations.length})
+              </button>
+              <button type="button" role="tab" aria-selected={!citationMode} onClick={() => setActiveCitationTab("sources")} className={`citation-tab${!citationMode ? " citation-tab-active" : ""}`}>
+                Related Sources ({latestSources.length})
+              </button>
+            </div>
+            <div className="citation-list">
+              {citationMode ? (
+                latestCitations.length ? latestCitations.map((citation, index) => {
+                  const href = citationHref(citation);
+                  const title = citationTitle(citation, documents);
+                  const contents = (
+                    <>
+                      <span className="citation-number">{index + 1}</span>
+                      <span className="citation-copy">
+                        <span className="citation-title">{title}</span>
+                        {citation.section && <span className="citation-detail">{citation.section}{"subsection" in citation && citation.subsection ? ` · ${citation.subsection}` : ""}</span>}
+                        {citation.page_start != null && <span className="citation-detail">Page {citation.page_start}{citation.page_end != null && citation.page_end !== citation.page_start ? `–${citation.page_end}` : ""}</span>}
+                        {citation.relevant_quote && <span className="citation-quote">{citation.relevant_quote}</span>}
+                      </span>
+                      <CitationIcon />
+                    </>
+                  );
+                  return href
+                    ? <a className="citation-row" href={href} target="_blank" rel="noopener noreferrer" key={`${citation.document_id}:${citation.chunk_id}`}>{contents}</a>
+                    : <Link className="citation-row" href={citationsDestination(citation)} key={`${citation.document_id}:${citation.chunk_id}`}>{contents}</Link>;
+                }) : <div className="citation-empty">Citations returned for the latest answer will appear here.</div>
+              ) : (
+                latestSources.length ? latestSources.map((source, index) => {
+                  const href = safeSourceUrl(source.source_url);
+                  const contents = (
+                    <>
+                      <span className="citation-number">{source.final_rank ?? index + 1}</span>
+                      <span className="citation-copy">
+                        <span className="citation-title">{source.title || source.document_id}</span>
+                        {source.section && <span className="citation-detail">{source.section}{source.subsection ? ` · ${source.subsection}` : ""}</span>}
+                        {source.page_start != null && <span className="citation-detail">Page {source.page_start}{source.page_end != null && source.page_end !== source.page_start ? `–${source.page_end}` : ""}</span>}
+                        <span className="citation-quote">{source.content.length > 220 ? `${source.content.slice(0, 217)}…` : source.content}</span>
+                      </span>
+                      <CitationIcon />
+                    </>
+                  );
+                  return href
+                    ? <a className="citation-row" href={href} target="_blank" rel="noopener noreferrer" key={source.chunk_id}>{contents}</a>
+                    : <Link className="citation-row" href={`/documents/${encodeURIComponent(source.document_id)}`} key={source.chunk_id}>{contents}</Link>;
+                }) : <div className="citation-empty">Related passages returned by retrieval will appear here.</div>
+              )}
+            </div>
+          </aside>
+        </div>
+
+        <form className="question-composer" onSubmit={submitQuestion}>
+          <label className="sr-only" htmlFor="legal-question">Ask a legal question</label>
+          <textarea
+            ref={questionInput}
+            id="legal-question"
+            className="question-textarea"
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && mode !== "compare") {
+                event.preventDefault();
+                event.currentTarget.form?.requestSubmit();
+              }
+            }}
+            maxLength={4000}
+            disabled={loading || mode === "compare"}
+            placeholder={mode === "document" ? "Ask a question about the selected document..." : mode === "compare" ? "Select two documents above to run a comparison." : "Ask a legal question..."}
+            rows={2}
+          />
+          <div className="composer-footer">
+            <div className="composer-tools">
+              <input
+                ref={fileInput}
+                type="file"
+                accept=".pdf,.txt,.html,.htm,.json"
+                className="composer-file"
+                aria-label="Attach a legal document"
+                disabled={uploading}
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) void uploadAttachment(file);
+                }}
+              />
+              <button type="button" className="composer-tool" onClick={() => fileInput.current?.click()} disabled={uploading}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m20 11.5-7.7 7.7a5 5 0 0 1-7.1-7.1l8.1-8.1a3.3 3.3 0 0 1 4.7 4.7l-8.1 8.1a1.7 1.7 0 0 1-2.4-2.4l7.4-7.4" /></svg>
+                {uploading ? "Uploading..." : attachedFile ? attachedFile.name : "Attach Document"}
+              </button>
+              <span className="composer-divider" />
+              <span className="composer-tool composer-tool-static" aria-label={mode === "document" ? "Question scope: selected document" : "Question scope: all indexed documents"}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" aria-hidden="true"><circle cx="12" cy="12" r="9" /><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" /></svg>
+                {mode === "document" && selectedDocument ? documents.find((doc) => doc.document_id === selectedDocument)?.title || "Selected document" : "All indexed documents"}
+              </span>
+            </div>
+            <button type="submit" className="dark-button" disabled={loading || mode === "compare" || !query.trim() || (mode === "document" && !selectedDocument)}>
+              {loading && mode !== "compare" ? "Sending..." : "Send"}
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true" width="15" height="15"><path d="m21 3-7.5 18-3.8-7.7L2 9.5 21 3Z" /><path d="M9.7 13.3 21 3" /></svg>
+            </button>
           </div>
-        )}
-      </div>
-    </main>
+          {(uploadMessage || uploadError || (uploadResult && uploadResult.indexing_status !== "indexed")) && (
+            <p className={`upload-status${uploadError ? " upload-status-error" : ""}`} role={uploadError ? "alert" : "status"}>
+              {uploadError || uploadMessage}
+              {uploadResult?.detail ? ` ${uploadResult.detail}` : ""}
+            </p>
+          )}
+        </form>
+        {error && <p className="assistant-error" role="alert">{error}</p>}
+      </main>
     </AppShell>
   );
 }

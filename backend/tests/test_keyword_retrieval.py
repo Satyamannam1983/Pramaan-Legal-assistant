@@ -180,3 +180,69 @@ class TestKeywordRetriever:
         retriever = KeywordRetriever()
         with pytest.raises(ValueError):
             await retriever.retrieve("")
+
+    @pytest.mark.asyncio
+    async def test_cached_index_rebuilds_when_chunk_count_changes(self, monkeypatch):
+        import app.db.connection as connection
+        import app.rag.retrieval.keyword_retriever as keyword_module
+
+        class Cursor:
+            def __init__(self, rows):
+                self.rows = rows
+
+            async def to_list(self, length=None):
+                return self.rows
+
+        chunks = [
+            {
+                "chunk_id": "doc:0",
+                "content": "Section 302 murder",
+                "document_id": "doc",
+                "section": "Section 302",
+            },
+            {
+                "chunk_id": "doc:1",
+                "content": "Section 299 homicide",
+                "document_id": "doc",
+                "section": "Section 299",
+            },
+        ]
+
+        class Collection:
+            def __init__(self, name):
+                self.name = name
+
+            def find(self, query, projection):
+                if self.name == "document_chunks":
+                    return Cursor(chunks[:1] if repo.count == 1 else chunks)
+                return Cursor([{"document_id": "doc", "title": "Penal Code"}])
+
+        class Database:
+            def __getitem__(self, name):
+                return Collection(name)
+
+        class Repository:
+            count = 1
+
+            def __init__(self):
+                pass
+
+            async def count_chunks(self):
+                return self.count
+
+        repo = Repository()
+        monkeypatch.setattr(keyword_module, "check_connection", lambda: _connected())
+        monkeypatch.setattr(keyword_module, "DocumentRepository", lambda: repo)
+        monkeypatch.setattr(connection, "get_db", lambda: Database())
+
+        async def _connected():
+            return True
+
+        retriever = KeywordRetriever()
+        first = await retriever._ensure_index()
+        assert first._n_docs == 1
+        repo.count = 2
+        second = await retriever._ensure_index()
+
+        assert second is not first
+        assert second._n_docs == 2

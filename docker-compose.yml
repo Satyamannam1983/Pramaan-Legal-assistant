@@ -3,7 +3,7 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
-    ports: ["8000:8000"]
+    ports: ["127.0.0.1:8000:8000"]
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -16,7 +16,7 @@ services:
       timeout: 5s
       retries: 5
     environment:
-      DATABASE_URL: ${DATABASE_URL:-mongodb://db:27017/pramaan}
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:-mongodb://db:27017/pramaan}
       EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-sentence_transformer}
       EMBEDDING_MODEL: ${EMBEDDING_MODEL:-intfloat/multilingual-e5-large}
       EMBEDDING_DIMENSION: ${EMBEDDING_DIMENSION:-1024}
@@ -26,8 +26,11 @@ services:
       CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:3000}
 
   web:
-    build: ./frontend
-    ports: ["3000:3000"]
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api}
+    ports: ["127.0.0.1:3000:3000"]
     environment:
       NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000/api}
     depends_on:
@@ -36,7 +39,7 @@ services:
 
   db:
     image: mongo:7
-    ports: ["27017:27017"]
+    ports: ["127.0.0.1:27017:27017"]
     environment:
       MONGO_INITDB_DATABASE: ${DATABASE_NAME:-pramaan}
     volumes:

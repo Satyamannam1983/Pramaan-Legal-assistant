@@ -23,8 +23,11 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from app.config import settings
 from app.rag.generation.context_builder import ContextBuilder
@@ -52,7 +55,6 @@ class LegalRAGService:
         self._retrieval_service = None
         self._evidence_selector = EvidenceSelector()
         self._context_builder = ContextBuilder()
-        self._citation_service = CitationService()
         self._grounding_validator = GroundingValidator()
 
     def _get_retrieval_service(self):
@@ -88,14 +90,15 @@ class LegalRAGService:
                 retrieval = self._get_retrieval_service()
                 search_results = await retrieval.search(query, top_k=settings.rerank_top_k)
             except Exception as exc:
-                logger.warning("Retrieval failed: %s", exc)
+                logger.warning("RAG retrieval failed (%s).", type(exc).__name__)
                 return LegalAnswer(
                     answer=(
                         "I couldn't retrieve legal sources at this time. "
                         "The search service may be temporarily unavailable."
                     ),
                     confidence="low",
-                    limitations=[f"Retrieval failed: {exc}"],
+                    limitations=["Legal source retrieval is temporarily unavailable."],
+                    abstained=True,
                 )
 
         if not search_results:
@@ -107,6 +110,7 @@ class LegalRAGService:
                 ),
                 confidence="low",
                 limitations=["No relevant evidence found in indexed sources."],
+                abstained=True,
             )
 
         # ── Stage 2: Convert to RerankResult for evidence selector ─────
@@ -118,6 +122,7 @@ class LegalRAGService:
                 document_id=r.document_id,
                 title=r.title,
                 section=r.section,
+                subsection=r.subsection,
                 page_start=r.page_start,
                 page_end=r.page_end,
                 document_type=r.document_type,
@@ -144,6 +149,7 @@ class LegalRAGService:
                 ),
                 confidence="low",
                 limitations=["Evidence below quality threshold."],
+                abstained=True,
             )
 
         # ── Stage 4: Context Construction ──────────────────────────────
@@ -160,17 +166,39 @@ class LegalRAGService:
                 max_tokens=settings.llm_max_tokens,
             )
         except Exception as exc:
-            logger.warning("LLM generation failed: %s", exc)
+            logger.warning("LLM generation failed (%s).", type(exc).__name__)
+            provider = os.getenv("LLM_PROVIDER", settings.llm_provider).strip().lower()
+            if provider == "openrouter":
+                return LegalAnswer(
+                    answer=(
+                        "OpenRouter answer generation is unavailable. "
+                        "No generated legal answer was accepted."
+                    ),
+                    confidence="low",
+                    limitations=[
+                        "The configured OpenRouter request failed; no answer was generated."
+                    ],
+                    generation_mode="failed",
+                    abstained=True,
+                )
             # Return evidence-based answer without LLM
             return self._build_evidence_only_answer(evidence_bundle, conv_id)
 
         # ── Stage 6: Parse Structured Output ───────────────────────────
-        legal_answer = self._parse_llm_output(llm_output, evidence_bundle)
+        legal_answer = self._parse_llm_output(llm_output)
+        if legal_answer.generation_mode == "failed":
+            return legal_answer
+        legal_answer.generation_mode = getattr(llm, "provider_name", "configured")
 
         # ── Stage 7: Citation Validation ───────────────────────────────
-        self._citation_service.load_evidence(evidence_bundle)
+        citation_service = CitationService()
+        citation_service.load_evidence(evidence_bundle)
+        claim_text = "\n".join([legal_answer.answer, *legal_answer.key_points])
         validation = self._grounding_validator.validate(
-            llm_output, self._citation_service, has_evidence=True
+            legal_answer.answer,
+            citation_service,
+            has_evidence=True,
+            key_points=legal_answer.key_points,
         )
 
         if not validation.is_grounded:
@@ -180,7 +208,29 @@ class LegalRAGService:
             )
 
         # ── Stage 8: Map citations to real metadata ────────────────────
-        validated_citations = self._citation_service.extract_citations(llm_output)
+        validated_citations = citation_service.extract_citations(claim_text)
+        if (
+            not validation.is_grounded
+            or not validated_citations
+            or not citation_service.validate_citations(validated_citations)
+        ):
+            logger.warning(
+                "Rejecting generated answer because citation validation failed: %s",
+                validation.summary,
+            )
+            return LegalAnswer(
+                answer=(
+                    "I couldn't verify the generated answer against the retrieved legal "
+                    "sources, so I can't provide it reliably."
+                ),
+                confidence="low",
+                limitations=[
+                    "Generated answer rejected because its citations were missing or invalid."
+                ],
+                generation_mode=legal_answer.generation_mode,
+                abstained=True,
+            )
+
         legal_answer.citations = [
             CitationRef(
                 citation_id=c.citation_id,
@@ -188,44 +238,54 @@ class LegalRAGService:
                 document_id=c.document_id,
                 title=c.title,
                 section=c.section,
+                subsection=c.subsection,
                 page_start=c.page_start,
                 page_end=c.page_end,
+                document_type=c.document_type,
+                court=c.court,
+                date=c.date,
+                source=c.source,
                 source_url=c.source_url,
                 relevant_quote=c.relevant_quote,
             )
             for c in validated_citations
         ]
+        legal_answer.grounding_valid = True
 
         elapsed_ms = (time.monotonic() - start_time) * 1000
         logger.info(
-            "RAG pipeline completed: query=%s, evidence=%d, citations=%d, "
-            "confidence=%s, %.0fms",
-            query[:60], len(evidence_bundle.items),
-            len(legal_answer.citations), legal_answer.confidence, elapsed_ms,
+            "RAG pipeline completed: evidence=%d, citations=%d, "
+            "confidence=%s, generation_mode=%s, latency_ms=%.1f",
+            len(evidence_bundle.items),
+            len(legal_answer.citations),
+            legal_answer.confidence,
+            legal_answer.generation_mode,
+            elapsed_ms,
         )
 
         return legal_answer
 
-    def _parse_llm_output(
-        self, llm_output: str, evidence_bundle: EvidenceBundle
-    ) -> LegalAnswer:
+    def _parse_llm_output(self, llm_output: str) -> LegalAnswer:
         """Parse the LLM's JSON output into a LegalAnswer."""
         try:
             data = json.loads(llm_output)
+            if not isinstance(data, dict) or not isinstance(data.get("answer"), str) or not data["answer"].strip():
+                raise ValueError("LLM response must contain a non-empty answer.")
             return LegalAnswer(
-                answer=data.get("answer", ""),
+                answer=data["answer"],
                 key_points=data.get("key_points", []),
                 citations=[],  # Will be populated by citation service
                 limitations=data.get("limitations", []),
                 confidence=data.get("confidence", "medium"),
             )
-        except (json.JSONDecodeError, KeyError) as exc:
-            logger.warning("Failed to parse LLM output as JSON: %s", exc)
-            # Try to extract answer from raw text
+        except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as exc:
+            logger.warning("LLM response parsing failed (%s).", type(exc).__name__)
             return LegalAnswer(
-                answer=llm_output.strip() if llm_output.strip() else "Unable to generate a structured response.",
+                answer="I couldn't produce a structured, verifiable answer from the retrieved sources.",
                 confidence="low",
-                limitations=["LLM output was not valid JSON. Showing raw response."],
+                limitations=["Generated response was invalid or incomplete; no answer was accepted."],
+                generation_mode="failed",
+                abstained=True,
             )
 
     def _build_evidence_only_answer(
@@ -233,7 +293,8 @@ class LegalRAGService:
     ) -> LegalAnswer:
         """Build a response using evidence only, when LLM is unavailable."""
         evidence_texts = []
-        for item in bundle.items[:3]:
+        fallback_items = bundle.items[:3]
+        for item in fallback_items:
             text = f"[{item.citation_id}]"
             if item.title:
                 text += f" {item.title}"
@@ -250,7 +311,9 @@ class LegalRAGService:
 
         return LegalAnswer(
             answer=answer,
-            key_points=["LLM unavailable — showing raw evidence."],
+            key_points=[
+                f"LLM unavailable — showing raw evidence. [{fallback_items[0].citation_id}]"
+            ],
             citations=[
                 CitationRef(
                     citation_id=item.citation_id,
@@ -258,12 +321,19 @@ class LegalRAGService:
                     document_id=item.document_id,
                     title=item.title,
                     section=item.section,
+                    subsection=item.subsection,
                     page_start=item.page_start,
                     page_end=item.page_end,
+                    document_type=item.document_type,
+                    court=item.court,
+                    date=item.date,
+                    source=item.source,
                     source_url=item.source_url,
                 )
-                for item in bundle.items
+                for item in fallback_items
             ],
             limitations=["LLM service unavailable. Answer is based on raw evidence only."],
             confidence="low",
+            grounding_valid=True,
+            generation_mode="evidence_only",
         )

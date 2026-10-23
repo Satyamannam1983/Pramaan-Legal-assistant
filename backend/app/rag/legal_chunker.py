@@ -17,13 +17,31 @@ class LegalChunker:
         self.chunk_size, self.chunk_overlap = chunk_size, chunk_overlap
 
     def chunk(self, pages: list[LoadedPage]) -> list[Chunk]:
-        text = "\n\n".join(p.text for p in pages if p.text)
-        if not text: return []
-        offsets, cursor = [], 0
+        text_parts: list[str] = []
+        offsets: list[tuple[int, int, int]] = []
+        cursor = 0
         for p in pages:
-            start, end = cursor, cursor + len(p.text)
+            page_text = p.text.strip()
+            if not page_text:
+                continue
+            if text_parts:
+                cursor += 2
+            start, end = cursor, cursor + len(page_text)
+            text_parts.append(page_text)
             offsets.append((start, end, p.page_number))
-            cursor = end + 2
+            cursor = end
+        text = "\n\n".join(text_parts)
+        if not text:
+            return []
+
+        section_markers: list[tuple[int, str]] = []
+        cursor = 0
+        for line in text.splitlines(keepends=True):
+            section = detect_section(line)
+            if section:
+                section_markers.append((cursor, section))
+            cursor += len(line)
+
         chunks, start, index = [], 0, 0
         while start < len(text):
             end = min(len(text), start + self.chunk_size)
@@ -33,7 +51,28 @@ class LegalChunker:
             segment = text[start:end].strip()
             if segment:
                 covered = [p for a, b, p in offsets if b > start and a < end]
-                chunks.append(Chunk(index, segment, min(covered) if covered else None, max(covered) if covered else None, detect_section(segment)))
+                active_section = next(
+                    (
+                        section
+                        for marker, section in reversed(section_markers)
+                        if start <= marker < end
+                    ),
+                    None,
+                ) or next(
+                    (
+                        section
+                        for marker, section in reversed(section_markers)
+                        if marker < start
+                    ),
+                    None,
+                )
+                chunks.append(Chunk(
+                    index,
+                    segment,
+                    min(covered) if covered else None,
+                    max(covered) if covered else None,
+                    active_section or detect_section(segment),
+                ))
                 index += 1
             if end >= len(text): break
             start = max(start + 1, end - self.chunk_overlap)

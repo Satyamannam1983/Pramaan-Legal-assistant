@@ -10,6 +10,7 @@ coverage/
 *.log
 data/uploads/*
 data/processed/*
+data/raw/supreme_court_english/
 !data/uploads/.gitkeep
 !data/processed/.gitkeep
 .DS_Store

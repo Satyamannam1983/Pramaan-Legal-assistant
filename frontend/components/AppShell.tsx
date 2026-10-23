@@ -1,68 +1,147 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
-const navigation = [
-  { href: "/", label: "Research" },
-  { href: "/documents", label: "Documents" },
-  { href: "/compare", label: "Compare" },
-  { href: "/evaluation", label: "Evaluation" },
+type IconName = "dashboard" | "assistant" | "documents" | "compare" | "analytics" | "menu" | "close" | "scales";
+
+const navigation: Array<{
+  group: string;
+  items: Array<{ href: string; label: string; icon: IconName }>;
+}> = [
+  {
+    group: "Workspace",
+    items: [
+      { href: "/dashboard", label: "Dashboard", icon: "dashboard" },
+      { href: "/", label: "Legal Assistant", icon: "assistant" },
+      { href: "/documents", label: "Documents", icon: "documents" },
+      { href: "/compare", label: "Document Comparison", icon: "compare" },
+    ],
+  },
+  {
+    group: "Analytics",
+    items: [{ href: "/evaluation", label: "Evaluation", icon: "analytics" }],
+  },
 ];
+
+function Icon({ name, className = "" }: { name: IconName; className?: string }) {
+  const common = {
+    className,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: 1.7,
+    strokeLinecap: "round" as const,
+    strokeLinejoin: "round" as const,
+    "aria-hidden": true as const,
+  };
+
+  if (name === "dashboard") {
+    return <svg {...common}><rect x="3.5" y="3.5" width="7" height="7" rx="1.3" /><rect x="13.5" y="3.5" width="7" height="7" rx="1.3" /><rect x="3.5" y="13.5" width="7" height="7" rx="1.3" /><rect x="13.5" y="13.5" width="7" height="7" rx="1.3" /></svg>;
+  }
+  if (name === "assistant") {
+    return <svg {...common}><path d="M5 4.5h14a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2h-7l-5 3v-3H5a2 2 0 0 1-2-2v-9a2 2 0 0 1 2-2Z" /><path d="M8 9h8M8 13h5" /></svg>;
+  }
+  if (name === "documents") {
+    return <svg {...common}><path d="M6 3.5h8l4 4v13H6a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2Z" /><path d="M14 3.5v5h5M8 13h8M8 17h8" /></svg>;
+  }
+  if (name === "compare") {
+    return <svg {...common}><rect x="3.5" y="4" width="7" height="16" rx="1.5" /><rect x="13.5" y="4" width="7" height="16" rx="1.5" /><path d="M6 8h2M6 12h2M16 8h2M16 12h2" /></svg>;
+  }
+  if (name === "analytics") {
+    return <svg {...common}><path d="M4 20V11h4v9M10 20V5h4v15M16 20v-7h4v7" /></svg>;
+  }
+  if (name === "scales") {
+    return <svg {...common}><path d="M12 3v17M7 21h10M5 6h14M12 3l-2-1M12 3l2-1M5 6l-3 7h6L5 6ZM19 6l-3 7h6l-3-7Z" /><path d="M2 13a3 3 0 0 0 6 0M16 13a3 3 0 0 0 6 0" /></svg>;
+  }
+  if (name === "close") {
+    return <svg {...common}><path d="m6 6 12 12M18 6 6 18" /></svg>;
+  }
+  return <svg {...common}><path d="M4 7h16M4 12h16M4 17h16" /></svg>;
+}
 
 export function AppShell({
   children,
-  eyebrow,
 }: {
   children: React.ReactNode;
-  eyebrow?: string;
 }) {
   const pathname = usePathname();
+  const [drawerOpen, setDrawerOpen] = useState(false);
+
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [pathname]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDrawerOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [drawerOpen]);
 
   return (
-    <div className="min-h-screen bg-slate-50 text-slate-900">
-      <header className="border-b border-slate-200 bg-white">
-        <div className="mx-auto flex max-w-7xl items-center justify-between gap-6 px-6 py-4">
-          <Link href="/" className="flex items-center gap-3">
-            <span className="grid h-9 w-9 place-items-center rounded-lg bg-slate-900 text-sm font-bold text-white">
-              P
-            </span>
-            <span>
-              <span className="block font-semibold tracking-tight">Pramaan</span>
-              <span className="block text-xs text-slate-500">
-                Evidence-first legal research
-              </span>
-            </span>
-          </Link>
-          <nav aria-label="Primary navigation" className="flex flex-wrap items-center justify-end gap-1">
-            {navigation.map((item) => {
-              const active =
-                item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
-              return (
-                <Link
-                  key={item.href}
-                  href={item.href}
-                  className={`rounded-md px-3 py-2 text-sm transition-colors ${
-                    active
-                      ? "bg-slate-100 font-medium text-slate-900"
-                      : "text-slate-600 hover:bg-slate-50 hover:text-slate-900"
-                  }`}
-                >
-                  {item.label}
-                </Link>
-              );
-            })}
-          </nav>
-        </div>
-      </header>
-      {eyebrow && (
-        <div className="border-b border-slate-200 bg-white">
-          <div className="mx-auto max-w-7xl px-6 py-2 text-xs font-medium uppercase tracking-wide text-teal-700">
-            {eyebrow}
-          </div>
-        </div>
+    <div className="app-shell">
+      {drawerOpen && (
+        <button
+          type="button"
+          className="sidebar-backdrop"
+          aria-label="Close navigation menu"
+          onClick={() => setDrawerOpen(false)}
+        />
       )}
-      {children}
+      <aside className={`app-sidebar${drawerOpen ? " app-sidebar-open" : ""}`} aria-label="Application navigation">
+        <Link href="/dashboard" className="brand-lockup">
+          <Icon name="scales" className="brand-mark" />
+          <span className="brand-copy">
+            <span className="brand-name">Pramaan</span>
+            <span className="brand-subtitle">Legal Intelligence</span>
+          </span>
+        </Link>
+        <nav className="sidebar-nav" aria-label="Primary navigation">
+          {navigation.map((section) => (
+            <div className="nav-section" key={section.group}>
+              <p className="nav-section-title">{section.group}</p>
+              <div className="nav-items">
+                {section.items.map((item) => {
+                  const active = item.href === "/"
+                    ? pathname === "/"
+                    : pathname === item.href || pathname.startsWith(`${item.href}/`);
+                  return (
+                    <Link
+                      key={item.href}
+                      href={item.href}
+                      aria-current={active ? "page" : undefined}
+                      className={`nav-item${active ? " nav-item-active" : ""}`}
+                    >
+                      <Icon name={item.icon} className="nav-icon" />
+                      <span>{item.label}</span>
+                    </Link>
+                  );
+                })}
+              </div>
+            </div>
+          ))}
+        </nav>
+        <div className="sidebar-footnote">Evidence-led legal research</div>
+      </aside>
+      <div className="app-main">
+        <header className="app-topbar">
+          <button
+            type="button"
+            className="mobile-menu-button"
+            aria-label={drawerOpen ? "Close navigation menu" : "Open navigation menu"}
+            aria-expanded={drawerOpen}
+            onClick={() => setDrawerOpen((open) => !open)}
+          >
+            <Icon name={drawerOpen ? "close" : "menu"} className="topbar-icon" />
+          </button>
+          <span className="topbar-context">Pramaan workspace</span>
+        </header>
+        <div className="app-page">{children}</div>
+      </div>
     </div>
   );
 }

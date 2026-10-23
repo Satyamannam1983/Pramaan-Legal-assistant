@@ -4,15 +4,17 @@ from __future__ import annotations
 import logging
 import os
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
 _llm_instance = None
 
 
 def _get_provider_config() -> tuple[str, str]:
-    """Read LLM config from env vars (avoids stale Settings singleton in tests)."""
-    provider = os.getenv("LLM_PROVIDER", "stub").lower().strip()
-    model = os.getenv("LLM_MODEL", "placeholder")
+    """Prefer live environment overrides, then validated application settings."""
+    provider = os.getenv("LLM_PROVIDER", settings.llm_provider).lower().strip()
+    model = os.getenv("LLM_MODEL", settings.llm_model)
     return provider, model
 
 
@@ -21,6 +23,7 @@ def get_llm_provider():
 
     Providers:
         - "openai" / "openai-compatible" → OpenAICompatibleLLM
+        - "openrouter" → OpenRouter via OpenAICompatibleLLM
         - "mock" / "stub" → MockLLM
     """
     global _llm_instance  # noqa: PLW0603
@@ -31,8 +34,17 @@ def get_llm_provider():
 
     if provider in ("openai", "openai-compatible", "openai_compatible"):
         from app.rag.generation.openai_provider import OpenAICompatibleLLM  # noqa: PLC0415
-        _llm_instance = OpenAICompatibleLLM()
+        _llm_instance = OpenAICompatibleLLM(model=model)
         logger.info("LLM provider: OpenAI (model=%s)", model)
+    elif provider == "openrouter":
+        from app.rag.generation.openai_provider import OpenAICompatibleLLM  # noqa: PLC0415
+        _llm_instance = OpenAICompatibleLLM(
+            model=model,
+            api_key=settings.openrouter_api_key or "",
+            base_url="https://openrouter.ai/api/v1",
+            provider_name="openrouter",
+        )
+        logger.info("LLM provider: OpenRouter (model=%s)", model)
     elif provider in ("mock", "stub"):
         from app.rag.generation.mock_provider import MockLLM  # noqa: PLC0415
         _llm_instance = MockLLM(model=model)

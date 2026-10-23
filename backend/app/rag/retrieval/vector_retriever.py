@@ -31,7 +31,9 @@ class VectorRetriever:
         top_k: int | None = None,
     ) -> None:
         self._embedding_service = embedding_service or get_embedding_service()
-        self._default_top_k = top_k or settings.vector_top_k
+        self._default_top_k = top_k if top_k is not None else settings.vector_top_k
+        if self._default_top_k <= 0:
+            raise ValueError("top_k must be positive.")
 
     async def retrieve(
         self,
@@ -53,6 +55,8 @@ class VectorRetriever:
             raise ValueError("Query must not be empty.")
 
         k = top_k if top_k is not None else self._default_top_k
+        if k <= 0:
+            raise ValueError("top_k must be positive.")
 
         # Avoid loading a multi-gigabyte local model when MongoDB is unavailable.
         if not await check_connection():
@@ -62,7 +66,8 @@ class VectorRetriever:
         try:
             query_vector = self._embedding_service.embed_text(query)
         except Exception as exc:
-            raise RuntimeError(f"Embedding provider unavailable: {exc}") from exc
+            logger.warning("Query embedding failed (%s).", type(exc).__name__)
+            raise RuntimeError("Embedding provider unavailable.") from None
 
         # Soft dimension check — warn but don't crash (model may differ from config)
         expected = settings.embedding_dimension
@@ -79,7 +84,8 @@ class VectorRetriever:
             repo = DocumentRepository()
             rows = await repo.similarity_search(query_vector, top_k=k, document_id=document_id)
         except Exception as exc:
-            raise RuntimeError(f"Database unavailable or query failed: {exc}") from exc
+            logger.warning("Dense database search failed (%s).", type(exc).__name__)
+            raise RuntimeError("Database unavailable or dense search failed.") from None
 
         results: list[RetrievalResult] = []
         for rank, row in enumerate(rows, start=1):
@@ -90,6 +96,7 @@ class VectorRetriever:
                     document_id=row.document_id,
                     title=row.title,
                     section=row.section,
+                    subsection=row.subsection,
                     page_start=row.page_start,
                     page_end=row.page_end,
                     document_type=row.document_type,

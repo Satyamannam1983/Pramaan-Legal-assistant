@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import time
 
 from app.config import settings
 from app.rag.retrieval.keyword_retriever import KeywordRetriever
@@ -14,11 +16,12 @@ logger = logging.getLogger(__name__)
 def reciprocal_rank_fusion(
     result_lists: list[list[RetrievalResult]],
     k: int | None = None,
+    weights: list[float] | None = None,
 ) -> list[FusedResult]:
     """Merge multiple ranked lists using Reciprocal Rank Fusion (RRF).
 
     For each result:
-        RRF score = SUM 1 / (k + rank)
+        RRF score = SUM weight / (k + rank)
 
     where rank is 1-based position in each list.
 
@@ -27,21 +30,43 @@ def reciprocal_rank_fusion(
     result_lists : list of ranked result lists from different retrievers.
     k : RRF constant (default from config). Higher k reduces the impact of
         top-ranked results.
+    weights : Per-list weights. Two-list calls default to configured dense and
+        lexical weights; other list counts default to equal weights.
 
     Returns
     -------
     Fused results sorted by descending RRF score.
     """
     rrf_k = k if k is not None else settings.rrf_k
+    if rrf_k <= 0:
+        raise ValueError("RRF k must be a positive integer.")
+    if weights is None:
+        weights = (
+            [settings.vector_weight, settings.keyword_weight]
+            if len(result_lists) == 2
+            else [1.0] * len(result_lists)
+        )
+    if len(weights) != len(result_lists):
+        raise ValueError("RRF weights must match the number of result lists.")
+    if (
+        any(not math.isfinite(weight) or weight < 0 for weight in weights)
+        or not any(weights)
+    ):
+        raise ValueError("RRF weights must be non-negative with at least one positive weight.")
 
-    # Accumulate scores per chunk_id
-    chunk_data: dict[str, dict] = {}
+    # Accumulate scores per source-document/chunk pair to avoid cross-document collisions.
+    chunk_data: dict[tuple[str, str], dict] = {}
 
-    for result_list in result_lists:
+    for list_index, result_list in enumerate(result_lists):
+        seen_in_list: set[tuple[str, str]] = set()
         for rank, result in enumerate(result_list, start=1):
-            cid = result.chunk_id
-            if cid not in chunk_data:
-                chunk_data[cid] = {
+            identity = (result.document_id, result.chunk_id)
+            if identity in seen_in_list:
+                continue
+            seen_in_list.add(identity)
+            key = identity
+            if key not in chunk_data:
+                chunk_data[key] = {
                     "result": result,
                     "rrf_score": 0.0,
                     "vector_rank": None,
@@ -49,20 +74,39 @@ def reciprocal_rank_fusion(
                     "vector_score": 0.0,
                     "keyword_score": 0.0,
                 }
+            entry = chunk_data[key]
 
-            chunk_data[cid]["rrf_score"] += 1.0 / (rrf_k + rank)
+            entry["rrf_score"] += weights[list_index] / (rrf_k + rank)
 
-            # Track which source contributed this result
-            if result.vector_score > 0 and result.vector_rank is not None:
-                chunk_data[cid]["vector_rank"] = result.vector_rank
-                chunk_data[cid]["vector_score"] = result.vector_score
-            if result.keyword_score > 0:
-                chunk_data[cid]["keyword_rank"] = rank
-                chunk_data[cid]["keyword_score"] = result.keyword_score
+            if list_index == 0:
+                entry["vector_rank"] = rank
+                entry["vector_score"] = result.vector_score
+            elif result.vector_score != 0:
+                entry["vector_score"] = result.vector_score
+            if list_index == 1:
+                entry["keyword_rank"] = rank
+                entry["keyword_score"] = result.keyword_score
+            elif result.keyword_score != 0:
+                entry["keyword_score"] = result.keyword_score
 
-    # Sort by RRF score descending
+            # Fill sparse metadata from the other retrieval result without overwriting
+            # provenance already supplied by the first ranked list.
+            preferred = entry["result"]
+            for field in (
+                "content", "title", "section", "subsection", "page_start",
+                "page_end", "document_type", "court", "date", "source", "source_url",
+            ):
+                if not getattr(preferred, field) and getattr(result, field):
+                    setattr(preferred, field, getattr(result, field))
+
+    # Stable tie-breaking keeps identical retrieval results ordered consistently.
     sorted_chunks = sorted(
-        chunk_data.values(), key=lambda x: x["rrf_score"], reverse=True
+        chunk_data.values(),
+        key=lambda x: (
+            -x["rrf_score"],
+            x["result"].document_id,
+            x["result"].chunk_id,
+        ),
     )
 
     fused: list[FusedResult] = []
@@ -135,8 +179,10 @@ class HybridRetriever:
     ) -> None:
         self._vector_retriever = vector_retriever or VectorRetriever()
         self._keyword_retriever = keyword_retriever or KeywordRetriever()
-        self._vector_top_k = vector_top_k or settings.vector_top_k
-        self._keyword_top_k = keyword_top_k or settings.keyword_top_k
+        self._vector_top_k = vector_top_k if vector_top_k is not None else settings.vector_top_k
+        self._keyword_top_k = keyword_top_k if keyword_top_k is not None else settings.keyword_top_k
+        if self._vector_top_k <= 0 or self._keyword_top_k <= 0:
+            raise ValueError("Retrieval candidate limits must be positive.")
 
     async def retrieve(
         self,
@@ -154,28 +200,62 @@ class HybridRetriever:
             raise ValueError("Query must not be empty.")
 
         k = top_k if top_k is not None else settings.rerank_top_k
+        if k <= 0:
+            raise ValueError("top_k must be positive.")
 
         # Run both retrievers
         vector_results: list[RetrievalResult] = []
         keyword_results: list[RetrievalResult] = []
+        vector_error: Exception | None = None
+        keyword_error: Exception | None = None
 
+        vector_start = time.monotonic()
         try:
             vector_results = await self._vector_retriever.retrieve(
                 query, top_k=self._vector_top_k, document_id=document_id
             )
+            vector_results.sort(
+                key=lambda result: (
+                    -result.vector_score,
+                    result.document_id,
+                    result.chunk_id,
+                )
+            )
         except Exception as exc:
-            logger.warning("Vector retrieval failed: %s", exc)
+            vector_error = exc
+            logger.warning("Vector retrieval failed (%s).", type(exc).__name__)
+        logger.info(
+            "Dense retrieval completed results=%d latency_ms=%.1f",
+            len(vector_results),
+            (time.monotonic() - vector_start) * 1000,
+        )
 
+        keyword_start = time.monotonic()
         try:
             kw_results = await self._keyword_retriever.retrieve(
                 query, top_k=self._keyword_top_k, document_id=document_id
             )
+            kw_results.sort(
+                key=lambda result: (
+                    -result.keyword_score,
+                    result.document_id,
+                    result.chunk_id,
+                )
+            )
             keyword_results = [_keyword_to_retrieval_result(kr) for kr in kw_results]
         except Exception as exc:
-            logger.warning("Keyword retrieval failed: %s", exc)
+            keyword_error = exc
+            logger.warning("Keyword retrieval failed (%s).", type(exc).__name__)
+        logger.info(
+            "Lexical retrieval completed results=%d latency_ms=%.1f",
+            len(keyword_results),
+            (time.monotonic() - keyword_start) * 1000,
+        )
 
         if not vector_results and not keyword_results:
-            logger.warning("Both vector and keyword retrieval returned no results.")
+            if vector_error is not None and keyword_error is not None:
+                raise RuntimeError("Both dense and lexical retrieval stages failed.") from None
+            logger.info("Dense and lexical retrieval completed with no results.")
             return []
 
         # Fuse via RRF

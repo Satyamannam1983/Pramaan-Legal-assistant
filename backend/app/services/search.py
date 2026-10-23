@@ -38,7 +38,10 @@ class SearchService:
             retriever = self._get_retriever()
             results = await retriever.retrieve(query, top_k=request.top_k)
         except RuntimeError as exc:
-            logger.warning("Search failed (DB or embedding unavailable): %s", exc)
+            logger.warning(
+                "Search failed (DB or embedding unavailable): %s",
+                type(exc).__name__,
+            )
             return SemanticSearchResponse(query=query, results=[])
 
         return SemanticSearchResponse(
@@ -50,6 +53,7 @@ class SearchService:
                     document_id=r.document_id,
                     title=r.title,
                     section=r.section,
+                    subsection=r.subsection,
                     page_start=r.page_start,
                     page_end=r.page_end,
                     document_type=r.document_type,

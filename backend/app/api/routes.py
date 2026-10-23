@@ -1,6 +1,8 @@
+import hashlib
+import os
 from pathlib import Path
 import logging
-from uuid import uuid4
+import tempfile
 from fastapi import APIRouter, File, HTTPException, UploadFile
 from app.config import settings
 from app.schemas import (
@@ -19,9 +21,15 @@ from app.schemas import (
 )
 from app.rag.loaders import LoaderError
 from app.services.document_processing import DocumentProcessingService
-from app.db.repository import DocumentRepository, DocumentData, ChunkData
+from app.db.repository import DocumentRepository
+from app.rag.indexing.document_indexer import DocumentIndexer
 from app.rag.document_analysis import DocumentAnalyzer, ComparisonService
-from app.rag.document_analysis.schemas import DocumentQuestion, CompareRequest, DocumentSummary
+from app.rag.document_analysis.schemas import (
+    DocumentQuestion,
+    CompareRequest,
+    DocumentSummary,
+    DocumentComparison,
+)
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -63,7 +71,10 @@ def _get_research_graph():
     """Lazy-compile the bounded LangGraph workflow once per process."""
     if not hasattr(router, "_research_graph"):
         from app.rag.graph import build_legal_research_graph  # noqa: PLC0415
-        router._research_graph = build_legal_research_graph()
+        router._research_graph = build_legal_research_graph(
+            retrieval_service=_get_retrieval_service(),
+            rag_service=_get_rag_service(),
+        )
     return router._research_graph
 
 
@@ -102,7 +113,25 @@ async def evaluation_report() -> dict:
     """Return the local evaluation report without exposing secrets."""
     report_path = Path("reports/evaluation_report.json")
     if not report_path.exists():
-        return {"status": "NOT RUN", "dataset_size": 0, "metrics": {}, "limitations": ["No report generated yet."]}
+        return {
+            "schema_version": 1,
+            "status": "NOT RUN",
+            "dataset_size": 0,
+            "evaluations": {
+                stage: {
+                    "status": "NOT RUN",
+                    "reason": "No evaluation report has been generated.",
+                    "metrics": {},
+                }
+                for stage in (
+                    "retrieval",
+                    "answer_generation",
+                    "document_analysis",
+                    "document_comparison",
+                )
+            },
+            "limitations": ["No evaluation report has been generated."],
+        }
     try:
         import json
         return json.loads(report_path.read_text(encoding="utf-8"))
@@ -140,6 +169,7 @@ async def search(request: SearchRequest) -> SearchResponse:
                     document_id=r.document_id,
                     title=r.title,
                     section=r.section,
+                    subsection=r.subsection,
                     page_start=r.page_start,
                     page_end=r.page_end,
                     document_type=r.document_type,
@@ -159,7 +189,8 @@ async def search(request: SearchRequest) -> SearchResponse:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("Hybrid search failed (error_type=%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Search service unavailable.") from None
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +209,11 @@ async def search_debug(request: SearchRequest) -> SearchDebugInfo:
 
     try:
         service = _get_retrieval_service()
-        debug = await service.search_debug(query, top_k=request.top_k)
+        debug = await service.search_debug(
+            query,
+            top_k=request.top_k,
+            document_id=request.document_id,
+        )
 
         def _to_item(r) -> SearchResultItem:
             return SearchResultItem(
@@ -218,7 +253,8 @@ async def search_debug(request: SearchRequest) -> SearchDebugInfo:
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("Search diagnostics failed (error_type=%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Search diagnostics unavailable.") from None
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +281,13 @@ async def chat(request: ChatRequest) -> ChatResponse:
                     document_id=c.document_id,
                     title=c.title,
                     section=c.section,
+                    subsection=c.subsection,
                     page_start=c.page_start,
                     page_end=c.page_end,
+                    document_type=c.document_type,
+                    court=c.court,
+                    date=c.date,
+                    source=c.source,
                     source_url=c.source_url,
                     relevant_quote=c.relevant_quote,
                 )
@@ -254,14 +295,30 @@ async def chat(request: ChatRequest) -> ChatResponse:
             ],
             limitations=state.get("limitations", answer.get("limitations", [])),
             confidence=answer.get("confidence", "low"),
+            abstained=answer.get("abstained", False),
             conversation_id=request.conversation_id or "",
             retrieval_attempts=state.get("retrieval_attempt", 0),
             strategies=state.get("strategies", []),
+            generation_mode=answer.get("generation_mode", state.get("generation_mode", "not_run")),
+            search_results=[
+                SearchResultItem.model_validate(result)
+                for result in state.get("search_results", [])
+            ],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("Question-answering workflow unavailable (%s).", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Question-answering workflow is temporarily unavailable.",
+        ) from None
+    except Exception as exc:
+        logger.error("Question-answering workflow failed (%s).", type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail="Question-answering workflow is temporarily unavailable.",
+        ) from None
 
 
 @router.post("/chat/debug")
@@ -314,6 +371,7 @@ async def search_semantic(request: SemanticSearchRequest) -> SemanticSearchRespo
                     document_id=r.document_id,
                     title=r.title,
                     section=r.section,
+                    subsection=r.subsection,
                     page_start=r.page_start,
                     page_end=r.page_end,
                     document_type=r.document_type,
@@ -329,7 +387,8 @@ async def search_semantic(request: SemanticSearchRequest) -> SemanticSearchRespo
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("Semantic search failed (error_type=%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Search service unavailable.") from None
 
 
 # ---------------------------------------------------------------------------
@@ -343,41 +402,78 @@ async def upload(file: UploadFile = File(...)) -> UploadResponse:
     if extension not in {".pdf", ".txt", ".html", ".htm", ".json"}:
         raise HTTPException(status_code=415, detail="Unsupported document type.")
     content = await _read_upload(file)
-    target = Path(settings.upload_dir)
-    target.mkdir(parents=True, exist_ok=True)
-    storage_name = f"{uuid4().hex}{extension}"
-    (target / storage_name).write_bytes(content)
-    processed = await document_processing_service.process(safe_name, content, include_all_chunks=True)
+    document_id = "upload-" + hashlib.sha256(extension.encode("utf-8") + b"\0" + content).hexdigest()
     try:
-        from app.rag.embeddings.factory import get_embedding_service
-        from app.db.connection import check_connection
-        if await check_connection():
-            metadata = processed.metadata
-            repo = DocumentRepository()
-            await repo.upsert_document(DocumentData(
-                document_id=metadata.document_id, title=metadata.title or safe_name,
-                document_type=metadata.document_type, source=metadata.source,
-                source_url=metadata.source_url, jurisdiction=metadata.jurisdiction,
-                court=metadata.court, case_name=metadata.case_name,
-                case_number=metadata.case_number, citation=metadata.citation,
-                date=metadata.date, act_name=metadata.act_name, language=metadata.language,
-                metadata=metadata.metadata,
-            ))
-            chunks = processed.all_chunks or []
-            embeddings = get_embedding_service().embed_documents([c.content for c in chunks])
-            await repo.upsert_chunks([
-                ChunkData(
-                    chunk_id=c.chunk_id, document_id=c.document_id, content=c.content,
-                    embedding=e, chunk_index=c.chunk_index, section=c.section,
-                    subsection=c.subsection, page_start=c.page_start, page_end=c.page_end,
-                    document_type=c.document_type, court=c.court, date=c.date,
-                    source=c.source, source_url=c.source_url,
-                ) for c, e in zip(chunks, embeddings)
-            ])
-    except Exception as exc:
-        logger.warning("Upload stored but indexing was unavailable: %s", exc)
-    logger.info("Accepted document upload: %s (%d bytes)", safe_name, len(content))
-    return UploadResponse(document_id=processed.metadata.document_id, filename=safe_name, content_type=file.content_type, size=len(content))
+        processed = await document_processing_service.process(
+            safe_name,
+            content,
+            include_all_chunks=True,
+            document_id=document_id,
+        )
+    except LoaderError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    target = Path(settings.upload_dir)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        stored_file = target / f"{document_id}{extension}"
+        if not stored_file.exists():
+            temporary_path: Path | None = None
+            try:
+                with tempfile.NamedTemporaryFile(
+                    dir=target,
+                    prefix=".upload-",
+                    suffix=".tmp",
+                    delete=False,
+                ) as temporary_file:
+                    temporary_path = Path(temporary_file.name)
+                    temporary_file.write(content)
+                    temporary_file.flush()
+                    os.fsync(temporary_file.fileno())
+                os.replace(temporary_path, stored_file)
+                temporary_path = None
+            finally:
+                if temporary_path is not None:
+                    try:
+                        temporary_path.unlink(missing_ok=True)
+                    except OSError:
+                        logger.warning("Unable to remove incomplete upload temporary file.")
+    except OSError as exc:
+        logger.error(
+            "Failed to store uploaded document (error_type=%s).",
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=500, detail="The document could not be stored.") from exc
+
+    from app.db.connection import check_connection  # noqa: PLC0415
+    indexing_status = "skipped"
+    detail = None
+    if await check_connection():
+        try:
+            await DocumentIndexer().index_record({
+                "metadata": processed.metadata.model_dump(mode="json"),
+                "all_chunks": [
+                    chunk.model_dump(mode="json")
+                    for chunk in (processed.all_chunks or [])
+                ],
+            })
+            indexing_status = "indexed"
+        except Exception as exc:
+            logger.error(
+                "Document upload indexing failed (error_type=%s).",
+                type(exc).__name__,
+            )
+            indexing_status = "failed"
+            detail = "The file was stored, but indexing failed."
+    logger.info("Accepted document upload (%d bytes).", len(content))
+    return UploadResponse(
+        document_id=processed.metadata.document_id,
+        filename=safe_name,
+        content_type=file.content_type,
+        size=len(content),
+        indexing_status=indexing_status,
+        detail=detail,
+    )
 
 
 @router.post("/documents/process", response_model=DocumentProcessResponse)
@@ -392,6 +488,12 @@ async def process_document(file: UploadFile = File(...)) -> DocumentProcessRespo
         )
     except LoaderError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except Exception as exc:
+        logger.warning(
+            "Document processing failed (error_type=%s).",
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="Document processing is unavailable.") from None
 
 
 @router.get("/documents", response_model=list[DocumentSummary])
@@ -409,6 +511,10 @@ async def list_documents() -> list[DocumentSummary]:
             ))
         return result
     except Exception as exc:
+        logger.warning(
+            "Document listing failed (error_type=%s).",
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="Document store unavailable.") from exc
 
 
@@ -416,11 +522,21 @@ async def list_documents() -> list[DocumentSummary]:
 async def get_document(document_id: str) -> dict:
     if not document_id or "/" in document_id or "\\" in document_id:
         raise HTTPException(status_code=422, detail="Invalid document ID.")
-    row = await DocumentRepository().get_document(document_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Document not found.")
-    row["chunk_count"] = await DocumentRepository().count_chunks(document_id)
-    return row
+    try:
+        repository = DocumentRepository()
+        row = await repository.get_document(document_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Document not found.")
+        row["chunk_count"] = await repository.count_chunks(document_id)
+        return row
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Document lookup failed (error_type=%s).",
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="Document store unavailable.") from None
 
 
 @router.get("/documents/{document_id}/analysis")
@@ -430,14 +546,18 @@ async def analyze_document(document_id: str) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:
+        logger.warning(
+            "Document analysis failed (error_type=%s).",
+            type(exc).__name__,
+        )
         raise HTTPException(status_code=503, detail="Document analysis unavailable.") from exc
 
 
 @router.post("/documents/{document_id}/ask", response_model=ChatResponse)
 async def ask_document(document_id: str, request: DocumentQuestion) -> ChatResponse:
-    if not await DocumentRepository().document_exists(document_id):
-        raise HTTPException(status_code=404, detail="Document not found.")
     try:
+        if not await DocumentRepository().document_exists(document_id):
+            raise HTTPException(status_code=404, detail="Document not found.")
         results = await _get_retrieval_service().search(
             request.query.strip(), top_k=settings.final_top_k, document_id=document_id
         )
@@ -451,19 +571,34 @@ async def ask_document(document_id: str, request: DocumentQuestion) -> ChatRespo
             answer=answer.answer, key_points=answer.key_points,
             citations=[CitationRef.model_validate(c.model_dump()) for c in answer.citations],
             limitations=answer.limitations, confidence=answer.confidence,
+            abstained=answer.abstained,
+            generation_mode=answer.generation_mode,
+            search_results=[
+                SearchResultItem.model_validate(result.__dict__)
+                for result in results
+            ],
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        logger.warning("Document retrieval failed (error_type=%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Document question service unavailable.") from None
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning(
+            "Document question failed (error_type=%s).",
+            type(exc).__name__,
+        )
+        raise HTTPException(status_code=503, detail="Document question service unavailable.") from None
 
 
-@router.post("/documents/compare")
-async def compare_documents(request: CompareRequest) -> dict:
+@router.post("/documents/compare", response_model=DocumentComparison)
+async def compare_documents(request: CompareRequest) -> DocumentComparison:
     if len(request.document_ids) != settings.max_comparison_documents:
         raise HTTPException(status_code=422, detail="Exactly two document IDs are required.")
     try:
-        return (await ComparisonService().compare(request.document_ids)).model_dump()
+        return await ComparisonService().compare(request.document_ids)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except Exception as exc:

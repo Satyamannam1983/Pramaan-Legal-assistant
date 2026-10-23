@@ -1,5 +1,5 @@
 from html.parser import HTMLParser
-from .base import LoadedDocument, LoadedPage
+from .base import LoadedDocument, LoadedPage, LoaderError
 
 class _TextParser(HTMLParser):
     def __init__(self):
@@ -16,5 +16,9 @@ class _TextParser(HTMLParser):
 class HTMLLoader:
     def load(self, content: bytes, filename: str) -> LoadedDocument:
         parser = _TextParser()
-        parser.feed(content.decode("utf-8-sig", errors="replace"))
+        try:
+            parser.feed(content.decode("utf-8-sig"))
+            parser.close()
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise LoaderError("Malformed HTML document.") from exc
         return LoadedDocument(filename, "text/html", [LoadedPage(1, "\n".join(parser.parts))])

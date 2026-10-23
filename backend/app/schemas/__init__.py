@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from datetime import datetime
+from typing import Literal
 
 
 # ---------------------------------------------------------------------------
@@ -65,7 +66,7 @@ class DocumentProcessResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 class SearchRequest(BaseModel):
-    query: str = Field(min_length=1, max_length=2000, description="Natural-language legal query")
+    query: str = Field(min_length=1, max_length=4000, description="Natural-language legal query")
     top_k: int = Field(default=5, ge=1, le=50, description="Number of chunks to return")
     document_id: str | None = None
     document_type: str | None = None
@@ -81,6 +82,7 @@ class SearchResultItem(BaseModel):
     document_id: str
     title: str | None = None
     section: str | None = None
+    subsection: str | None = None
     page_start: int | None = None
     page_end: int | None = None
     document_type: str | None = None
@@ -132,6 +134,7 @@ class SemanticSearchResult(BaseModel):
     document_id: str
     title: str | None = None
     section: str | None = None
+    subsection: str | None = None
     page_start: int | None = None
     page_end: int | None = None
     document_type: str | None = None
@@ -153,13 +156,18 @@ class SemanticSearchResponse(BaseModel):
 
 class CitationRef(BaseModel):
     """A citation referenced in the answer."""
-    citation_id: str
-    chunk_id: str = ""
-    document_id: str = ""
+    citation_id: str = Field(pattern=r"^SOURCE [1-9]\d*$")
+    chunk_id: str = Field(min_length=1)
+    document_id: str = Field(min_length=1)
     title: str | None = None
     section: str | None = None
+    subsection: str | None = None
     page_start: int | None = None
     page_end: int | None = None
+    document_type: str | None = None
+    court: str | None = None
+    date: str | None = None
+    source: str | None = None
     source_url: str | None = None
     relevant_quote: str | None = None
 
@@ -175,9 +183,12 @@ class ChatResponse(BaseModel):
     citations: list[CitationRef] = []
     limitations: list[str] = []
     confidence: str = "low"
+    abstained: bool = False
     conversation_id: str = ""
     retrieval_attempts: int = 0
     strategies: list[str] = Field(default_factory=list)
+    search_results: list[SearchResultItem] = Field(default_factory=list)
+    generation_mode: str = "not_run"
 
 
 class UploadResponse(BaseModel):
@@ -186,3 +197,5 @@ class UploadResponse(BaseModel):
     content_type: str | None
     size: int
     status: str = "accepted"
+    indexing_status: Literal["indexed", "skipped", "failed"] = "skipped"
+    detail: str | None = None

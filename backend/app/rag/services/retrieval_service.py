@@ -97,29 +97,61 @@ class LegalRetrievalService:
 
         Returns top_k results. Falls back gracefully if any stage fails.
         """
-        k = top_k or settings.final_top_k
+        k = top_k if top_k is not None else settings.final_top_k
+        if k <= 0:
+            raise ValueError("top_k must be positive.")
         query = query.strip()
         if not query:
             return []
 
+        total_start = time.monotonic()
         try:
             hybrid = self._get_hybrid_retriever()
             fused = await hybrid.retrieve(query, top_k=settings.rerank_top_k, document_id=document_id)
         except Exception as exc:
-            logger.warning("Hybrid retrieval failed, trying vector-only: %s", exc)
+            logger.warning(
+                "Hybrid retrieval failed (%s); trying vector-only retrieval.",
+                type(exc).__name__,
+            )
             try:
                 vector = VectorRetriever()
                 v_results = await vector.retrieve(query, top_k=k, document_id=document_id)
-                return [self._vector_to_search_item(r, i + 1) for i, r in enumerate(v_results)]
+                results = [
+                    self._vector_to_search_item(r, i + 1)
+                    for i, r in enumerate(v_results)
+                ]
+                logger.info(
+                    "Retrieval completed mode=vector_fallback results=%d latency_ms=%.1f",
+                    len(results),
+                    (time.monotonic() - total_start) * 1000,
+                )
+                return results
             except Exception as exc2:
-                logger.warning("Vector-only retrieval also failed: %s", exc2)
+                logger.warning(
+                    "Vector-only retrieval failed (%s).", type(exc2).__name__
+                )
+                logger.info(
+                    "Retrieval completed mode=failed results=0 latency_ms=%.1f",
+                    (time.monotonic() - total_start) * 1000,
+                )
                 return []
 
         if not fused:
+            logger.info(
+                "Retrieval completed mode=hybrid results=0 latency_ms=%.1f",
+                (time.monotonic() - total_start) * 1000,
+            )
             return []
 
         # Apply reranking if available
-        reranker = self._get_reranker()
+        try:
+            reranker = self._get_reranker()
+        except Exception as exc:
+            logger.warning(
+                "Reranker initialization failed (%s); using RRF ranking.",
+                type(exc).__name__,
+            )
+            reranker = None
         if reranker is not None:
             try:
                 from app.rag.reranking.base import RerankResult  # noqa: PLC0415
@@ -149,7 +181,7 @@ class LegalRetrievalService:
                     for f in fused
                 ]
                 reranked = await reranker.rerank(query, candidates, top_k=k)
-                return [
+                results = [
                     SearchResultItem(
                         chunk_id=r.chunk_id,
                         content=r.content,
@@ -172,11 +204,19 @@ class LegalRetrievalService:
                     )
                     for i, r in enumerate(reranked)
                 ]
+                logger.info(
+                    "Retrieval completed mode=hybrid results=%d latency_ms=%.1f reranker=enabled",
+                    len(results),
+                    (time.monotonic() - total_start) * 1000,
+                )
+                return results
             except Exception as exc:
-                logger.warning("Reranking failed, using RRF scores: %s", exc)
+                logger.warning(
+                    "Reranking failed (%s); using RRF ranking.", type(exc).__name__
+                )
 
         # Fallback: use RRF scores without reranking
-        return [
+        results = [
             SearchResultItem(
                 chunk_id=f.chunk_id,
                 content=f.content,
@@ -199,14 +239,24 @@ class LegalRetrievalService:
             )
             for i, f in enumerate(fused[:k])
         ]
+        logger.info(
+            "Retrieval completed mode=hybrid results=%d latency_ms=%.1f reranker=%s",
+            len(results),
+            (time.monotonic() - total_start) * 1000,
+            "enabled" if reranker is not None else "disabled",
+        )
+        return results
 
     async def search_debug(
         self,
         query: str,
         top_k: int | None = None,
+        document_id: str | None = None,
     ) -> RetrievalDebugInfo:
         """Search with full debug information for each retrieval stage."""
-        k = top_k or settings.final_top_k
+        k = top_k if top_k is not None else settings.final_top_k
+        if k <= 0:
+            raise ValueError("top_k must be positive.")
         query = query.strip()
         if not query:
             return RetrievalDebugInfo(query=query)
@@ -219,10 +269,10 @@ class LegalRetrievalService:
         try:
             vector = VectorRetriever()
             debug.vector_results = await vector.retrieve(
-                query, top_k=settings.vector_top_k
+                query, top_k=settings.vector_top_k, document_id=document_id
             )
         except Exception as exc:
-            logger.warning("Vector retrieval failed in debug: %s", exc)
+            logger.warning("Vector retrieval failed in debug (%s).", type(exc).__name__)
         debug.vector_time_ms = (time.monotonic() - v_start) * 1000
 
         # Stage 2: Keyword retrieval
@@ -230,16 +280,15 @@ class LegalRetrievalService:
         try:
             hybrid = self._get_hybrid_retriever()
             # Access the keyword retriever directly
-            from app.rag.retrieval.keyword_retriever import KeywordRetriever  # noqa: PLC0415
             from app.rag.retrieval.hybrid_retriever import _keyword_to_retrieval_result  # noqa: PLC0415
 
             kw_retriever = hybrid._keyword_retriever
             kw_results = await kw_retriever.retrieve(
-                query, top_k=settings.keyword_top_k
+                query, top_k=settings.keyword_top_k, document_id=document_id
             )
             debug.keyword_results = [_keyword_to_retrieval_result(kr) for kr in kw_results]
         except Exception as exc:
-            logger.warning("Keyword retrieval failed in debug: %s", exc)
+            logger.warning("Keyword retrieval failed in debug (%s).", type(exc).__name__)
         debug.keyword_time_ms = (time.monotonic() - kw_start) * 1000
 
         # Stage 3: RRF fusion
@@ -251,12 +300,19 @@ class LegalRetrievalService:
                 [debug.vector_results, debug.keyword_results]
             )
         except Exception as exc:
-            logger.warning("Fusion failed in debug: %s", exc)
+            logger.warning("Fusion failed in debug (%s).", type(exc).__name__)
         debug.fusion_time_ms = (time.monotonic() - fusion_start) * 1000
 
         # Stage 4: Reranking
         rerank_start = time.monotonic()
-        reranker = self._get_reranker()
+        try:
+            reranker = self._get_reranker()
+        except Exception as exc:
+            logger.warning(
+                "Reranker initialization failed in debug (%s).",
+                type(exc).__name__,
+            )
+            reranker = None
         if reranker is not None and debug.fused_results:
             try:
                 from app.rag.reranking.base import RerankResult  # noqa: PLC0415
@@ -289,7 +345,7 @@ class LegalRetrievalService:
                     query, candidates, top_k=k
                 )
             except Exception as exc:
-                logger.warning("Reranking failed in debug: %s", exc)
+                logger.warning("Reranking failed in debug (%s).", type(exc).__name__)
                 debug.reranker_available = False
         else:
             debug.reranker_available = False

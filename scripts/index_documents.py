@@ -13,6 +13,7 @@ import asyncio
 import sys
 import time
 from pathlib import Path
+from urllib.parse import urlparse
 
 sys.path.insert(0, str(Path(__file__).parents[1] / "backend"))
 
@@ -28,19 +29,25 @@ def _progress_bar(current: int, total: int, width: int = 40) -> str:
     return f"\r[{bar}] {current}/{total}"
 
 
-async def main(processed_dir: Path, show_progress: bool) -> None:
+async def main(processed_dir: Path, show_progress: bool) -> int:
     print("=" * 60)
     print("Pramaan — Document Indexing (MongoDB)")
     print("=" * 60)
 
-    print(f"\nDatabase URL : {settings.database_url}")
+    database_uri = urlparse(settings.database_url)
+    database_target = (
+        "MongoDB Atlas"
+        if database_uri.scheme == "mongodb+srv"
+        else "MongoDB"
+    )
+    print(f"\nDatabase target : {database_target} (connection details redacted)")
     print("\nConnecting to MongoDB…")
     if not await check_connection():
         print("[ERR] Cannot connect to MongoDB.")
         print("  Set DATABASE_URL in your .env file:")
         print("    Local:  mongodb://localhost:27017/pramaan")
         print("    Atlas:  mongodb+srv://user:pass@cluster.mongodb.net/pramaan")
-        sys.exit(1)
+        return 1
 
     print("[OK] MongoDB connected")
     await init_db()
@@ -51,7 +58,7 @@ async def main(processed_dir: Path, show_progress: bool) -> None:
     if not jsonl_files:
         print(f"\nNo processed JSONL files found in {processed_dir}")
         print("Run: python scripts/process_documents.py")
-        sys.exit(1)
+        return 1
 
     print(f"\nProcessed directory : {processed_dir}")
     print(f"JSONL files found   : {len(jsonl_files)}")
@@ -100,13 +107,16 @@ async def main(processed_dir: Path, show_progress: bool) -> None:
         print(f"\n  Errors ({len(stats.errors)}):")
         for err in stats.errors:
             print(f"    [ERR] {err}")
+        print("\nIndexing completed with errors.")
+        return 1
 
     if stats.chunks_indexed == 0:
         print("\n  [WARN]  No chunks were indexed.")
         print("     Check that JSONL files contain 'sample_chunks' or 'all_chunks'.")
-        sys.exit(1)
+        return 1
 
     print("\nDatabase indexing complete. [OK]")
+    return 0
 
 
 if __name__ == "__main__":
@@ -114,4 +124,6 @@ if __name__ == "__main__":
     parser.add_argument("--processed-dir", default=settings.processed_dir)
     parser.add_argument("--no-progress", action="store_true")
     args = parser.parse_args()
-    asyncio.run(main(Path(args.processed_dir), show_progress=not args.no_progress))
+    raise SystemExit(
+        asyncio.run(main(Path(args.processed_dir), show_progress=not args.no_progress))
+    )

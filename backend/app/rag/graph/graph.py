@@ -16,16 +16,30 @@ from app.rag.graph.nodes import (
     validate_answer,
 )
 from app.rag.graph.state import LegalResearchState
+from app.rag.services.rag_service import LegalRAGService
+from app.rag.services.retrieval_service import LegalRetrievalService
 
 
-def build_legal_research_graph():
+def build_legal_research_graph(
+    retrieval_service: LegalRetrievalService | None = None,
+    rag_service: LegalRAGService | None = None,
+):
+    service = retrieval_service if retrieval_service is not None else LegalRetrievalService()
+    answer_service = rag_service if rag_service is not None else LegalRAGService()
     workflow = StateGraph(LegalResearchState)
     workflow.add_node("analyze_query", analyze_query)
     workflow.add_node("select_retrieval_strategy", select_retrieval_strategy)
-    workflow.add_node("retrieve_evidence", retrieve_evidence)
+
+    async def retrieve_with_service(state: LegalResearchState):
+        return await retrieve_evidence(state, service)
+
+    async def generate_with_service(state: LegalResearchState):
+        return await generate_answer(state, answer_service)
+
+    workflow.add_node("retrieve_evidence", retrieve_with_service)
     workflow.add_node("evaluate_evidence", evaluate_evidence)
     workflow.add_node("refine_query", refine_query)
-    workflow.add_node("generate_answer", generate_answer)
+    workflow.add_node("generate_answer", generate_with_service)
     workflow.add_node("validate_answer", validate_answer)
     workflow.add_node("abstain", abstain)
     workflow.add_node("finalize", finalize)

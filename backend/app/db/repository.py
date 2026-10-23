@@ -16,7 +16,7 @@ For MongoDB Atlas (production):
 from __future__ import annotations
 
 import logging
-import os
+
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -24,13 +24,14 @@ from typing import Any
 import numpy as np
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
+from app.config import settings
 from app.db.connection import get_db
 from app.db.models import CHUNKS_COLLECTION, DOCUMENTS_COLLECTION
 
 logger = logging.getLogger(__name__)
 
 # Set ATLAS_VECTOR_SEARCH=true to use $vectorSearch (MongoDB Atlas only)
-_USE_ATLAS = os.getenv("ATLAS_VECTOR_SEARCH", "false").lower() == "true"
+_USE_ATLAS = settings.atlas_vector_search
 
 
 # ---------------------------------------------------------------------------
@@ -89,6 +90,7 @@ class RetrievedChunk:
     source: str | None
     source_url: str | None
     similarity_score: float
+    subsection: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,14 @@ class DocumentRepository:
     async def delete_document_chunks(self, document_id: str) -> None:
         await self._db[CHUNKS_COLLECTION].delete_many({"document_id": document_id})
 
+    async def delete_stale_chunks(self, document_id: str, keep_chunk_ids: list[str]) -> None:
+        await self._db[CHUNKS_COLLECTION].delete_many(
+            {
+                "document_id": document_id,
+                "chunk_id": {"$nin": keep_chunk_ids},
+            }
+        )
+
     # ------------------------------------------------------------------
     # Similarity search
     # ------------------------------------------------------------------
@@ -245,6 +255,7 @@ class DocumentRepository:
                 "content": 1,
                 "document_id": 1,
                 "section": 1,
+                "subsection": 1,
                 "page_start": 1,
                 "page_end": 1,
                 "document_type": 1,
@@ -268,6 +279,9 @@ class DocumentRepository:
         )
         docs = await doc_cursor.to_list(length=None)
         title_map: dict[str, str | None] = {d["document_id"]: d.get("title") for d in docs}
+        chunks = [c for c in chunks if c["document_id"] in title_map]
+        if not chunks:
+            return []
 
         # Vectorised cosine similarity
         q = np.array(query_embedding, dtype=np.float32)
@@ -295,6 +309,7 @@ class DocumentRepository:
                 document_id=chunks[i]["document_id"],
                 title=title_map.get(chunks[i]["document_id"]),
                 section=chunks[i].get("section"),
+                subsection=chunks[i].get("subsection"),
                 page_start=chunks[i].get("page_start"),
                 page_end=chunks[i].get("page_end"),
                 document_type=chunks[i].get("document_type"),
@@ -334,7 +349,7 @@ class DocumentRepository:
                     "as": "doc",
                 }
             },
-            {"$unwind": {"path": "$doc", "preserveNullAndEmptyArrays": True}},
+            {"$unwind": "$doc"},
             {
                 "$project": {
                     "_id": 0,
@@ -343,6 +358,7 @@ class DocumentRepository:
                     "document_id": 1,
                     "title": "$doc.title",
                     "section": 1,
+                    "subsection": 1,
                     "page_start": 1,
                     "page_end": 1,
                     "document_type": 1,
@@ -363,6 +379,7 @@ class DocumentRepository:
                 document_id=r["document_id"],
                 title=r.get("title"),
                 section=r.get("section"),
+                subsection=r.get("subsection"),
                 page_start=r.get("page_start"),
                 page_end=r.get("page_end"),
                 document_type=r.get("document_type"),

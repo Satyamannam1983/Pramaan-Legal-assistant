@@ -11,4 +11,4 @@ class PDFLoader:
         except ImportError as exc:
             raise LoaderError("PDF support is unavailable; install pypdf") from exc
         except Exception as exc:
-            raise LoaderError(f"Malformed PDF document: {exc}") from exc
+            raise LoaderError("Malformed PDF document.") from exc

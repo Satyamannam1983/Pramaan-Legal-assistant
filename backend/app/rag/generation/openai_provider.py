@@ -18,15 +18,19 @@ class OpenAICompatibleLLM:
     Requires `openai` package and a valid API key.
     """
 
+    provider_name = "openai-compatible"
+
     def __init__(
         self,
         model: str | None = None,
         api_key: str | None = None,
         base_url: str | None = None,
+        provider_name: str = "openai-compatible",
     ) -> None:
         self._model = model or settings.llm_model
-        self._api_key = api_key or settings.openai_api_key
+        self._api_key = settings.openai_api_key if api_key is None else api_key
         self._base_url = base_url or settings.llm_base_url
+        self.provider_name = provider_name
         self._client = None
 
     @property
@@ -39,7 +43,7 @@ class OpenAICompatibleLLM:
 
         if not self._api_key:
             raise RuntimeError(
-                "No API key configured. Set OPENAI_API_KEY in .env."
+                "No API key configured for the selected LLM provider."
             )
 
         try:
@@ -50,7 +54,7 @@ class OpenAICompatibleLLM:
                 kwargs["base_url"] = self._base_url
 
             self._client = AsyncOpenAI(**kwargs)
-            logger.info("OpenAI client initialised (model=%s)", self._model)
+            logger.info("%s client initialised (model=%s)", self.provider_name, self._model)
         except ImportError as exc:
             raise RuntimeError(
                 "openai package not installed. Run: pip install openai"
@@ -84,5 +88,5 @@ class OpenAICompatibleLLM:
             content = response.choices[0].message.content or ""
             return content
         except Exception as exc:
-            logger.error("LLM generation failed: %s", exc)
-            raise RuntimeError(f"LLM generation failed: {exc}") from exc
+            logger.error("LLM generation failed (%s).", type(exc).__name__)
+            raise RuntimeError("LLM generation failed.") from None

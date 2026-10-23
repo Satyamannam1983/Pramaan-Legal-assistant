@@ -1,5 +1,7 @@
-from dataclasses import dataclass
 from datetime import datetime, timezone
+import json
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 from app.config import settings
 from app.schemas import DocumentMetadata, DocumentPage, DocumentChunk, DocumentProcessResponse
@@ -8,15 +10,13 @@ from app.rag.processors import process_pages
 from app.rag.legal_chunker import LegalChunker
 
 
-@dataclass
-class ProcessingResult:
-    filename: str
-    status: str = "queued"
-    chunks: int = 0
-
-
 class DocumentProcessingService:
-    """Pipeline seam for parsing, cleaning, chunking and indexing documents."""
+    """Parse, clean, and chunk source documents for either indexing path."""
+
+    @staticmethod
+    def _metadata_text(metadata: dict, key: str) -> str | None:
+        value = metadata.get(key)
+        return str(value) if value is not None else None
 
     async def process(
         self,
@@ -24,33 +24,58 @@ class DocumentProcessingService:
         content: bytes,
         *,
         include_all_chunks: bool = False,
+        document_id: str | None = None,
+        source: str | None = None,
+        metadata_overrides: dict[str, Any] | None = None,
     ) -> DocumentProcessResponse:
-        ext = filename.lower().rsplit(".", 1)[-1] if "." in filename else "txt"
+        if not content or not content.strip():
+            raise LoaderError("The document is empty.")
+        suffix = Path(filename).suffix.lower()
+        if not suffix:
+            raise LoaderError("The document filename must include a supported extension.")
+        ext = suffix[1:]
         loader = {"txt": TXTLoader, "text": TXTLoader, "html": HTMLLoader, "htm": HTMLLoader, "json": JSONLoader, "pdf": PDFLoader}.get(ext)
         if loader is None:
             raise LoaderError(f"Unsupported document format: .{ext}")
         loaded = loader().load(content, filename)
         pages = process_pages(loaded.pages)
-        doc_id = str(uuid4())
+        if not any(page.text for page in pages):
+            raise LoaderError("The document contains no readable text.")
+        doc_id = document_id or str(uuid4())
+        if not doc_id.strip() or ":" in doc_id:
+            raise LoaderError("The source document identifier is invalid.")
         chunks = LegalChunker(settings.chunk_size, settings.chunk_overlap).chunk(pages)
-        source_metadata = loaded.metadata
+        if not chunks:
+            raise LoaderError("The document contains no readable text.")
+        source_metadata = {**loaded.metadata, **(metadata_overrides or {})}
+        metadata_text = self._metadata_text
+        document_source = metadata_text(source_metadata, "source") or source or "user_upload"
+        title = metadata_text(source_metadata, "title") or Path(filename).stem.replace("_", " ").title()
         metadata = DocumentMetadata(
             document_id=doc_id, filename=filename, content_type=loaded.content_type,
-            document_type=str(source_metadata.get("document_type") or ext.upper()),
-            title=source_metadata.get("title"),
-            source=str(source_metadata.get("source") or "user_upload"),
-            source_url=source_metadata.get("source_url"),
-            jurisdiction=source_metadata.get("jurisdiction"),
-            court=source_metadata.get("court"),
-            case_name=source_metadata.get("case_name"),
-            case_number=source_metadata.get("case_number"),
-            citation=source_metadata.get("citation"),
-            date=str(source_metadata["date"]) if source_metadata.get("date") else None,
-            act_name=source_metadata.get("act_name"),
-            section=source_metadata.get("section"),
-            language=source_metadata.get("language"),
+            document_type=metadata_text(source_metadata, "document_type") or ext.upper(),
+            title=title,
+            source=document_source,
+            source_url=metadata_text(source_metadata, "source_url"),
+            jurisdiction=metadata_text(source_metadata, "jurisdiction"),
+            court=metadata_text(source_metadata, "court"),
+            case_name=metadata_text(source_metadata, "case_name"),
+            case_number=metadata_text(source_metadata, "case_number"),
+            citation=metadata_text(source_metadata, "citation"),
+            date=metadata_text(source_metadata, "date"),
+            act_name=metadata_text(source_metadata, "act_name"),
+            section=metadata_text(source_metadata, "section"),
+            language=metadata_text(source_metadata, "language"),
             size=len(content),
-            metadata={key: str(value) for key, value in source_metadata.items() if key not in {"title", "source", "source_url"}},
+            metadata={
+                key: (
+                    json.dumps(value, ensure_ascii=False, sort_keys=True)
+                    if isinstance(value, (dict, list))
+                    else str(value)
+                )
+                for key, value in source_metadata.items()
+                if key not in {"title", "source", "source_url"}
+            },
             created_at=datetime.now(timezone.utc),
         )
         serialized_chunks = [
@@ -58,7 +83,11 @@ class DocumentProcessingService:
                 chunk_id=f"{doc_id}:{c.index}", document_id=doc_id, content=c.text,
                 text=c.text, page_start=c.page_start, page_end=c.page_end,
                 section=c.section, subsection=None, chunk_index=c.index,
-                document_type=ext.upper(), source="user_upload",
+                document_type=metadata.document_type,
+                court=metadata.court,
+                date=metadata.date,
+                source=document_source,
+                source_url=metadata.source_url,
             ) for c in chunks
         ]
         return DocumentProcessResponse(

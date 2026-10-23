@@ -81,12 +81,30 @@ class EvidenceSelector:
         EvidenceBundle with selected evidence items.
         """
         total = len(candidates)
+        candidates = [
+            candidate
+            for candidate in candidates
+            if isinstance(candidate.chunk_id, str)
+            and bool(candidate.chunk_id.strip())
+            and isinstance(candidate.document_id, str)
+            and bool(candidate.document_id.strip())
+            and isinstance(candidate.content, str)
+            and bool(candidate.content.strip())
+        ]
+        unique_candidates: list[RerankResult] = []
+        seen_chunks: set[tuple[str, str]] = set()
+        for candidate in candidates:
+            identity = (candidate.document_id.strip(), candidate.chunk_id.strip())
+            if identity not in seen_chunks:
+                seen_chunks.add(identity)
+                unique_candidates.append(candidate)
+        candidates = unique_candidates
 
         if not candidates:
             return EvidenceBundle(
                 items=[],
                 query=query,
-                total_candidates=0,
+                total_candidates=total,
                 filtered_count=0,
             )
 
@@ -128,8 +146,8 @@ class EvidenceSelector:
             evidence_items.append(
                 EvidenceItem(
                     citation_id=f"SOURCE {i}",
-                    chunk_id=item.chunk_id,
-                    document_id=item.document_id,
+                    chunk_id=item.chunk_id.strip(),
+                    document_id=item.document_id.strip(),
                     content=item.content,
                     title=item.title,
                     section=item.section,

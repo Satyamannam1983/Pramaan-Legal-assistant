@@ -16,6 +16,8 @@ class MockLLM:
     Always returns a valid JSON LegalAnswer structure.
     """
 
+    provider_name = "stub"
+
     def __init__(self, model: str = "mock-model") -> None:
         self._model = model
 
@@ -48,14 +50,17 @@ class MockLLM:
                 "source_url": None,
             })
 
+        source_refs = " ".join(
+            f"[SOURCE {i}]" for i in range(1, min(source_count + 1, 4))
+        )
         answer = {
             "answer": (
-                "Based on the retrieved legal sources, this is a mock response. "
+                f"Based on the retrieved legal sources {source_refs}, this is a mock response. "
                 "Configure a real LLM provider (OPENAI_API_KEY) for actual legal analysis."
             ),
             "key_points": [
-                "This is a mock response from the test LLM provider.",
-                "Set LLM_PROVIDER=openai and provide OPENAI_API_KEY for real answers.",
+                f"This is a mock response from the test LLM provider. {source_refs}".strip(),
+                f"Set LLM_PROVIDER=openai and provide OPENAI_API_KEY for real answers. {source_refs}".strip(),
             ],
             "citations": citations,
             "limitations": [
