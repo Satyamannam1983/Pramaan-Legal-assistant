@@ -11,26 +11,28 @@ export type FollowUpPrompt = {
 
 export function buildFollowUpPrompts(
   evidence: readonly EvidenceReference[],
+  answer: string,
 ): FollowUpPrompt[] {
   const source = evidence.find((item) => item.document_id);
   if (!source) return [];
 
-  const title = source.title?.trim() || source.document_id;
+  const answerContext = answer.trim().slice(0, 500);
+  if (!answerContext) return [];
   return [
     {
       documentId: source.document_id,
-      label: "Supporting evidence",
-      query: `Which passage in ${title} most directly supports the answer?`,
+      label: "Show evidence",
+      query: `What evidence in the cited source supports this answer: "${answerContext}"?`,
     },
     {
       documentId: source.document_id,
-      label: "Court's reasoning",
-      query: `What legal reasoning does ${title} give on this issue?`,
+      label: "Explain reasoning",
+      query: `What reasoning in the cited source supports this answer: "${answerContext}"?`,
     },
     {
       documentId: source.document_id,
-      label: "Limits or exceptions",
-      query: `What limitation or exception in ${title} could affect this answer?`,
+      label: "Find exceptions",
+      query: `Does the cited source describe any exception to this answer: "${answerContext}"?`,
     },
   ];
 }

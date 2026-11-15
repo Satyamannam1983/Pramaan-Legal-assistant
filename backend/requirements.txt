@@ -19,3 +19,4 @@ numpy>=1.26,<3
 # Utilities
 pytest-asyncio>=0.23,<1
 langgraph>=0.2,<1
+pyarrow>=17,<26

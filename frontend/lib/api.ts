@@ -1,7 +1,7 @@
 export const API_URL =
   process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000/api";
 
-const RAG_REQUEST_TIMEOUT_MS = 180_000;
+const RAG_REQUEST_TIMEOUT_MS = 300_000;
 
 export type CitationRef = {
   citation_id: string;
@@ -77,6 +77,7 @@ export type SearchResponse = {
 
 export type DocumentQuestionRequest = {
   query: string;
+  follow_up?: boolean;
 };
 
 export type DocumentSummary = {
@@ -133,6 +134,44 @@ export type DocumentDetail = {
   case_number: string | null;
   date: string | null;
   chunk_count: number;
+};
+
+export type CorpusCourtStats = {
+  documents: number;
+  chunks: number;
+};
+
+export type CorpusStats = {
+  metadata_records_available: number | null;
+  metadata_records_by_dataset: {
+    supreme_court: number | null;
+    high_courts: number | null;
+  };
+  archive_coverage: {
+    supreme_court_english_years: number[];
+    high_court_year_courts: Array<{
+      year: number;
+      court_id: string;
+    }>;
+  };
+  archives_downloaded: number;
+  pdfs_extracted: number;
+  indexed_documents: number;
+  indexed_chunks: number;
+  indexed_by_court: {
+    supreme_court: CorpusCourtStats;
+    high_courts: CorpusCourtStats;
+  };
+  ingestion: {
+    status: string;
+    documents_processed: number;
+    documents_to_index: number;
+    documents_indexed: number;
+    chunks_indexed: number;
+    duplicates_skipped: number;
+    failed_documents: number;
+    pending_documents: number;
+  };
 };
 
 export type DocumentAnalysisResponse = {
@@ -292,6 +331,10 @@ export function askQuestion(request: ChatRequest, signal?: AbortSignal) {
 
 export function listDocuments(signal?: AbortSignal) {
   return requestJson<DocumentSummary[]>("/documents", { signal });
+}
+
+export function getCorpusStats(signal?: AbortSignal) {
+  return requestJson<CorpusStats>("/corpus/stats", { signal });
 }
 
 export function getDocument(documentId: string, signal?: AbortSignal) {

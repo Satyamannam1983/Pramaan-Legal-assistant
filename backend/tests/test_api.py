@@ -26,6 +26,90 @@ def test_health_aliases():
     assert resp2.status_code == 200
 
 
+def test_corpus_stats_reports_database_and_dataset_progress(tmp_path, monkeypatch):
+    import json
+    import app.api.routes as routes
+
+    class Repository:
+        async def count_documents(self):
+            return 7
+
+        async def count_chunks(self):
+            return 41
+
+        async def count_documents_for_court(self, court_name):
+            return 3 if court_name == "Supreme Court" else 4
+
+        async def count_chunks_for_court(self, court_name):
+            return 17 if court_name == "Supreme Court" else 24
+
+    data_root = tmp_path / "data" / "raw" / "aws_open_data"
+    data_root.mkdir(parents=True)
+    (data_root / "download_manifest.json").write_text(json.dumps({
+        "metadata_records_available": {
+            "supreme_court": 12,
+            "high_courts": 34,
+        },
+        "archive_coverage": {
+            "supreme_court_english_years": [2018, 2019],
+            "high_court_year_courts": [{"year": 2023, "court_id": "5_15"}],
+        },
+    }), encoding="utf-8")
+    (data_root / "ingestion_status.json").write_text(json.dumps({
+        "status": "running",
+        "documents_processed": 5,
+        "documents_to_index": 20,
+        "documents_indexed": 4,
+        "chunks_indexed": 30,
+        "duplicates_skipped": 1,
+        "failed_documents": 2,
+        "pending_documents": 3,
+    }), encoding="utf-8")
+    archive = data_root / "supreme_court" / "data" / "tar" / "year=2023" / "english"
+    archive.mkdir(parents=True)
+    (archive / "english.tar").write_bytes(b"archive")
+    extracted = data_root / "supreme_court" / "extracted" / "year=2023" / "english"
+    extracted.mkdir(parents=True)
+    (extracted / "judgment.pdf").write_bytes(b"%PDF-1.7")
+    legacy_batch = tmp_path / "data" / "raw" / "supreme_court_english_2023_batch" / "pdfs"
+    legacy_batch.mkdir(parents=True)
+    (legacy_batch / "judgment.pdf").write_bytes(b"%PDF-1.7")
+
+    monkeypatch.setattr(routes, "AWS_DATA_ROOT", data_root)
+    monkeypatch.setattr(routes, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(routes, "DocumentRepository", Repository)
+
+    response = client.get("/api/corpus/stats")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "metadata_records_available": 46,
+        "metadata_records_by_dataset": {"supreme_court": 12, "high_courts": 34},
+        "archive_coverage": {
+            "supreme_court_english_years": [2018, 2019],
+            "high_court_year_courts": [{"year": 2023, "court_id": "5_15"}],
+        },
+        "archives_downloaded": 1,
+        "pdfs_extracted": 1,
+        "indexed_documents": 7,
+        "indexed_chunks": 41,
+        "indexed_by_court": {
+            "supreme_court": {"documents": 3, "chunks": 17},
+            "high_courts": {"documents": 4, "chunks": 24},
+        },
+        "ingestion": {
+            "status": "running",
+            "documents_processed": 5,
+            "documents_to_index": 20,
+            "documents_indexed": 4,
+            "chunks_indexed": 30,
+            "duplicates_skipped": 1,
+            "failed_documents": 2,
+            "pending_documents": 3,
+        },
+    }
+
+
 def test_search_returns_semantic_response():
     """Search endpoint returns SemanticSearchResponse shape (empty results without DB)."""
     response = client.post("/api/search", json={"query": "contract", "top_k": 5})
@@ -93,8 +177,9 @@ def test_document_question_preserves_document_filter_and_chat_response_contract(
             )]
 
     class RAG:
-        async def answer(self, query, search_results):
+        async def answer(self, query, search_results, follow_up=False):
             assert query == "question"
+            assert follow_up is False
             return LegalAnswer(
                 answer="Answer [SOURCE 1]",
                 citations=[CitationRef(

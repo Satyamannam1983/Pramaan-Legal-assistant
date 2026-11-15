@@ -34,7 +34,7 @@ test("general question request uses the chat endpoint and query contract", async
   assert.deepEqual(JSON.parse(String(requestInit?.body)), { query: "  contract  " });
 });
 
-test("RAG requests allow time for an initial local embedding-model load", async () => {
+test("RAG requests allow time for an initial local embedding-model load and retrieval", async () => {
   const originalSetTimeout = globalThis.setTimeout;
   let timeoutMs: number | undefined;
   globalThis.setTimeout = ((...args: Parameters<typeof setTimeout>) => {
@@ -45,7 +45,7 @@ test("RAG requests allow time for an initial local embedding-model load", async 
 
   try {
     await askQuestion({ query: "question" });
-    assert.equal(timeoutMs, 180_000);
+    assert.equal(timeoutMs, 300_000);
   } finally {
     globalThis.setTimeout = originalSetTimeout;
   }
@@ -64,6 +64,21 @@ test("document question preserves an encoded document ID and query body", async 
 
   assert.match(requestedUrl, /\/documents\/doc%2Fone\/ask$/);
   assert.deepEqual(requestBody, { query: "question" });
+});
+
+test("document follow-up request marks the question for focused generation", async () => {
+  let requestBody: unknown;
+  globalThis.fetch = async (_input, init) => {
+    requestBody = JSON.parse(String(init?.body));
+    return Response.json({ answer: "focused answer" });
+  };
+
+  await askDocument("doc-1", { query: "What supports this?", follow_up: true });
+
+  assert.deepEqual(requestBody, {
+    query: "What supports this?",
+    follow_up: true,
+  });
 });
 
 test("comparison sends exactly the selected identifiers in their selected order", async () => {

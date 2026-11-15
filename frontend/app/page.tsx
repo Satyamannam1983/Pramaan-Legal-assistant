@@ -3,8 +3,15 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import Link from "next/link";
 import { AppShell } from "../components/AppShell";
+import { LegalAnswerCard } from "../components/LegalAnswerCard";
 import { PageHeader } from "../components/PageHeader";
-import { buildFollowUpPrompts } from "../lib/follow-up";
+import {
+  readAssistantSession,
+  saveAssistantSession,
+  type ChatTurn,
+  type WorkspaceMode,
+} from "../lib/chat-session";
+import type { FollowUpPrompt } from "../lib/follow-up";
 import {
   askDocument,
   askQuestion,
@@ -17,23 +24,11 @@ import {
   type ComparisonCitation,
   type DocumentComparisonResponse,
   type DocumentSummary,
-  type SearchResult,
   type CitationRef,
   type UploadResponse,
 } from "../lib/api";
 
-type WorkspaceMode = "general" | "document" | "compare";
 type Citation = CitationRef | ComparisonCitation;
-type ChatTurn = {
-  id: string;
-  question: string;
-  answer: string;
-  citations: Citation[];
-  sources: SearchResult[];
-  abstained: boolean;
-  limitations: string[];
-  mode: WorkspaceMode;
-};
 
 function makeComparisonAnswer(result: DocumentComparisonResponse): string {
   const sections = [
@@ -45,53 +40,6 @@ function makeComparisonAnswer(result: DocumentComparisonResponse): string {
     result.outcome_comparison ? `Outcome\n${result.outcome_comparison}` : "",
   ];
   return sections.filter(Boolean).join("\n\n");
-}
-
-function AnswerContent({ answer }: { answer: string }) {
-  const lines = answer.split(/\r?\n/);
-  const blocks: Array<{ type: "paragraph" | "heading" | "ul" | "ol"; content: string[] }> = [];
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    const heading = trimmed.match(/^#{1,3}\s+(.+)$/);
-    const unordered = trimmed.match(/^[-*]\s+(.+)$/);
-    const ordered = trimmed.match(/^\d+[.)]\s+(.+)$/);
-    if (heading) {
-      blocks.push({ type: "heading", content: [heading[1]] });
-    } else if (unordered || ordered) {
-      const type = unordered ? "ul" : "ol";
-      const value = (unordered ?? ordered)?.[1] ?? trimmed;
-      const last = blocks[blocks.length - 1];
-      if (last?.type === type) last.content.push(value);
-      else blocks.push({ type, content: [value] });
-    } else {
-      const last = blocks[blocks.length - 1];
-      if (last?.type === "paragraph") last.content.push(trimmed);
-      else blocks.push({ type: "paragraph", content: [trimmed] });
-    }
-  }
-
-  return (
-    <div className="assistant-answer">
-      {blocks.map((block, index) => {
-        if (block.type === "heading") return <h3 key={index}>{block.content[0]}</h3>;
-        if (block.type === "ul" || block.type === "ol") {
-          const List = block.type === "ul" ? "ul" : "ol";
-          return <List key={index}>{block.content.map((item, itemIndex) => <li key={itemIndex}>{formatInline(item)}</li>)}</List>;
-        }
-        return <p key={index}>{formatInline(block.content.join(" "))}</p>;
-      })}
-    </div>
-  );
-}
-
-function formatInline(text: string) {
-  return text.split(/(\*\*[^*]+\*\*)/g).map((part, index) =>
-    part.startsWith("**") && part.endsWith("**")
-      ? <strong key={index}>{part.slice(2, -2)}</strong>
-      : part
-  );
 }
 
 function AssistantMark() {
@@ -132,6 +80,8 @@ function citationsDestination(citation: Citation) {
 export default function Home() {
   const [mode, setMode] = useState<WorkspaceMode>("general");
   const [query, setQuery] = useState("");
+  const [followUpPending, setFollowUpPending] = useState(false);
+  const [followUpLabel, setFollowUpLabel] = useState<string | null>(null);
   const [selectedDocument, setSelectedDocument] = useState("");
   const [comparisonDocuments, setComparisonDocuments] = useState<[string, string]>(["", ""]);
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
@@ -142,12 +92,14 @@ export default function Home() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [activeCitationTab, setActiveCitationTab] = useState<"citations" | "sources">("citations");
+  const [selectedSourceKey, setSelectedSourceKey] = useState<string | null>(null);
   const [conversationId, setConversationId] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadMessage, setUploadMessage] = useState("");
   const [uploadError, setUploadError] = useState("");
   const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
   const [attachedFile, setAttachedFile] = useState<File | null>(null);
+  const [sessionRestored, setSessionRestored] = useState(false);
   const requestController = useRef<AbortController | null>(null);
   const uploadController = useRef<AbortController | null>(null);
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -155,12 +107,55 @@ export default function Home() {
   const chatScroll = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
+    const saved = readAssistantSession(window.sessionStorage);
+    if (saved) {
+      setMode(saved.mode);
+      setQuery(saved.query);
+      setFollowUpPending(saved.followUp);
+      setFollowUpLabel(saved.followUpLabel);
+      setSelectedDocument(saved.selectedDocument);
+      setComparisonDocuments(saved.comparisonDocuments);
+      setConversationId(saved.conversationId);
+      setTurns(saved.turns);
+    }
+    setSessionRestored(true);
+  }, []);
+
+  useEffect(() => {
+    if (!sessionRestored) return;
+    saveAssistantSession(window.sessionStorage, {
+      mode,
+      query,
+      followUp: followUpPending,
+      followUpLabel,
+      selectedDocument,
+      comparisonDocuments,
+      conversationId,
+      turns,
+    });
+  }, [
+    sessionRestored,
+    mode,
+    query,
+    followUpPending,
+    followUpLabel,
+    selectedDocument,
+    comparisonDocuments,
+    conversationId,
+    turns,
+  ]);
+
+  useEffect(() => {
     const controller = new AbortController();
     listDocuments(controller.signal)
       .then((items) => {
         if (!controller.signal.aborted) {
           setDocuments(items);
-          setSelectedDocument(items[0]?.document_id ?? "");
+          setSelectedDocument((current) =>
+            items.some((item) => item.document_id === current)
+              ? current
+              : items[0]?.document_id ?? "",
+          );
         }
       })
       .catch((failure: unknown) => {
@@ -184,7 +179,18 @@ export default function Home() {
     event.preventDefault();
     const trimmed = query.trim();
     if (!trimmed || loading || mode === "compare") return;
-    if (mode === "document" && !selectedDocument) {
+    await askQuery(trimmed, followUpLabel ?? trimmed, followUpPending, selectedDocument);
+  }
+
+  async function askQuery(
+    submittedQuery: string,
+    visibleQuestion: string,
+    isFollowUp: boolean,
+    documentId: string,
+  ) {
+    const requestMode: WorkspaceMode = isFollowUp ? "document" : mode;
+    if (!submittedQuery || loading || requestMode === "compare") return;
+    if (requestMode === "document" && !documentId) {
       setError("Choose an indexed document before asking a document-specific question.");
       return;
     }
@@ -193,30 +199,46 @@ export default function Home() {
     const controller = new AbortController();
     requestController.current = controller;
     setLoading(true);
-    setPendingQuestion(trimmed);
+    setPendingQuestion(visibleQuestion);
     setError("");
 
     try {
-      const response: ChatResponse = mode === "document"
-        ? await askDocument(selectedDocument, { query: trimmed }, controller.signal)
-        : await askQuestion({ query: trimmed, conversation_id: conversationId }, controller.signal);
+      const response: ChatResponse = requestMode === "document"
+        ? await askDocument(
+          documentId,
+          {
+            query: submittedQuery,
+            ...(isFollowUp ? { follow_up: true } : {}),
+          },
+          controller.signal,
+        )
+        : await askQuestion({ query: submittedQuery, conversation_id: conversationId }, controller.signal);
       if (requestController.current !== controller) return;
       setQuery("");
-      if (mode === "general") setConversationId(response.conversation_id);
+      setFollowUpPending(false);
+      setFollowUpLabel(null);
+      if (requestMode === "general") setConversationId(response.conversation_id);
       setTurns((current) => [
         ...current,
         {
           id: `${response.conversation_id}:${current.length}`,
-          question: trimmed,
+          question: visibleQuestion,
           answer: response.answer,
+          confidence: response.confidence,
+          generationMode: response.generation_mode,
           citations: response.citations,
           sources: response.search_results,
           abstained: response.abstained,
           limitations: response.limitations,
-          mode,
+          mode: requestMode,
         },
       ]);
       setActiveCitationTab("citations");
+      setSelectedSourceKey(
+        response.citations[0]
+          ? `${response.citations[0].document_id}:${response.citations[0].chunk_id}`
+          : null,
+      );
     } catch (failure) {
       if (!controller.signal.aborted && requestController.current === controller) {
         setError(getErrorMessage(failure));
@@ -322,15 +344,20 @@ export default function Home() {
 
   function changeMode(nextMode: WorkspaceMode) {
     setMode(nextMode);
+    setFollowUpPending(false);
+    setFollowUpLabel(null);
     setError("");
   }
 
-  function useFollowUp(prompt: { documentId: string; query: string }) {
+  function useFollowUp(prompt: FollowUpPrompt) {
+    if (loading) return;
     setSelectedDocument(prompt.documentId);
     setMode("document");
-    setQuery(prompt.query);
+    setFollowUpPending(true);
+    setFollowUpLabel(prompt.label);
+    setQuery("");
     setError("");
-    requestAnimationFrame(() => questionInput.current?.focus());
+    void askQuery(prompt.query, prompt.label, true, prompt.documentId);
   }
 
   return (
@@ -411,44 +438,15 @@ export default function Home() {
                 </div>
               )}
               {turns.map((turn) => {
-                const followUps = buildFollowUpPrompts(
-                  turn.citations.length ? turn.citations : turn.sources,
-                );
                 return <article className="chat-turn" key={turn.id}>
                   <div className="user-message-row">
                     <div className="user-message">{turn.question}</div>
                   </div>
-                  <div className="assistant-message-row">
-                    <AssistantMark />
-                    <div className="assistant-message">
-                      <div className="assistant-message-meta">
-                        <span>Pramaan</span>
-                        <span>{turn.mode === "compare" ? "Document comparison" : turn.mode === "document" ? "Document-specific research" : "Legal research"}</span>
-                      </div>
-                      <AnswerContent answer={turn.answer} />
-                      {turn.abstained && <p className="insufficient-note">The system abstained because the available evidence was not sufficient to support a verified answer.</p>}
-                      {!turn.citations.length && !turn.sources.length && !turn.abstained && (
-                        <p className="insufficient-note">No citations or supporting passages were returned for this response.</p>
-                      )}
-                      {!!turn.limitations.length && <p className="message-limitations">{turn.limitations.join(" ")}</p>}
-                      {followUps.length > 0 && (
-                        <div className="follow-up-prompts" aria-label="Evidence-grounded follow-up questions">
-                          <p className="follow-up-heading">Ask about the cited document</p>
-                          {followUps.map((prompt) => (
-                            <button
-                              type="button"
-                              key={`${prompt.documentId}:${prompt.label}`}
-                              className="follow-up-button"
-                              onClick={() => useFollowUp(prompt)}
-                              disabled={loading}
-                            >
-                              {prompt.label}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                  </div>
+                  <LegalAnswerCard
+                    turn={turn}
+                    onFollowUp={useFollowUp}
+                    followUpsDisabled={loading}
+                  />
                 </article>
               })}
               {pendingQuestion && (
@@ -461,19 +459,35 @@ export default function Home() {
           </section>
 
           <aside className="surface-panel citation-panel" aria-label="Sources for the latest response">
+            <div className="citation-panel-heading">
+              <div>
+                <h2>Research sources</h2>
+                <p>{latest ? "Sources for the latest answer" : "Citations and related passages appear here"}</p>
+              </div>
+              {latest && (
+                <span className={`answer-status answer-status-${latest.abstained ? "neutral" : latest.citations.length ? "success" : "neutral"}`}>
+                  <span className="answer-status-dot" aria-hidden="true" />
+                  {latest.abstained ? "Not verified" : latest.citations.length ? "Cited" : "No citations"}
+                </span>
+              )}
+            </div>
             <div className="citation-tabs" role="tablist" aria-label="Evidence panel">
-              <button type="button" role="tab" aria-selected={citationMode} onClick={() => setActiveCitationTab("citations")} className={`citation-tab${citationMode ? " citation-tab-active" : ""}`}>
-                Citations ({latestCitations.length})
+              <button id="citation-tab-citations" type="button" role="tab" aria-controls="citation-panel-content" aria-selected={citationMode} onClick={() => setActiveCitationTab("citations")} className={`citation-tab${citationMode ? " citation-tab-active" : ""}`}>
+                Citations <span>{latestCitations.length}</span>
               </button>
-              <button type="button" role="tab" aria-selected={!citationMode} onClick={() => setActiveCitationTab("sources")} className={`citation-tab${!citationMode ? " citation-tab-active" : ""}`}>
-                Related Sources ({latestSources.length})
+              <button id="citation-tab-related" type="button" role="tab" aria-controls="citation-panel-content" aria-selected={!citationMode} onClick={() => setActiveCitationTab("sources")} className={`citation-tab${!citationMode ? " citation-tab-active" : ""}`}>
+                Related Sources <span>{latestSources.length}</span>
               </button>
             </div>
-            <div className="citation-list">
+            <div className="citation-list" id="citation-panel-content" role="tabpanel" aria-labelledby={citationMode ? "citation-tab-citations" : "citation-tab-related"}>
               {citationMode ? (
                 latestCitations.length ? latestCitations.map((citation, index) => {
                   const href = citationHref(citation);
                   const title = citationTitle(citation, documents);
+                  const key = `${citation.document_id}:${citation.chunk_id}`;
+                  const matchedSource = latestSources.find(
+                    (source) => source.document_id === citation.document_id && source.chunk_id === citation.chunk_id,
+                  );
                   const contents = (
                     <>
                       <span className="citation-number">{index + 1}</span>
@@ -481,18 +495,19 @@ export default function Home() {
                         <span className="citation-title">{title}</span>
                         {citation.section && <span className="citation-detail">{citation.section}{"subsection" in citation && citation.subsection ? ` · ${citation.subsection}` : ""}</span>}
                         {citation.page_start != null && <span className="citation-detail">Page {citation.page_start}{citation.page_end != null && citation.page_end !== citation.page_start ? `–${citation.page_end}` : ""}</span>}
-                        {citation.relevant_quote && <span className="citation-quote">{citation.relevant_quote}</span>}
+                        {(citation.relevant_quote || matchedSource?.content) && <span className="citation-quote">{citation.relevant_quote || matchedSource?.content}</span>}
                       </span>
                       <CitationIcon />
                     </>
                   );
                   return href
-                    ? <a className="citation-row" href={href} target="_blank" rel="noopener noreferrer" key={`${citation.document_id}:${citation.chunk_id}`}>{contents}</a>
-                    : <Link className="citation-row" href={citationsDestination(citation)} key={`${citation.document_id}:${citation.chunk_id}`}>{contents}</Link>;
+                    ? <a className={`citation-row${selectedSourceKey === key ? " citation-row-selected" : ""}`} href={href} target="_blank" rel="noopener noreferrer" key={key} onClick={() => setSelectedSourceKey(key)}>{contents}</a>
+                    : <Link className={`citation-row${selectedSourceKey === key ? " citation-row-selected" : ""}`} href={citationsDestination(citation)} key={key} onClick={() => setSelectedSourceKey(key)}>{contents}</Link>;
                 }) : <div className="citation-empty">Citations returned for the latest answer will appear here.</div>
               ) : (
                 latestSources.length ? latestSources.map((source, index) => {
                   const href = safeSourceUrl(source.source_url);
+                  const key = `${source.document_id}:${source.chunk_id}`;
                   const contents = (
                     <>
                       <span className="citation-number">{source.final_rank ?? index + 1}</span>
@@ -506,8 +521,8 @@ export default function Home() {
                     </>
                   );
                   return href
-                    ? <a className="citation-row" href={href} target="_blank" rel="noopener noreferrer" key={source.chunk_id}>{contents}</a>
-                    : <Link className="citation-row" href={`/documents/${encodeURIComponent(source.document_id)}`} key={source.chunk_id}>{contents}</Link>;
+                    ? <a className={`citation-row${selectedSourceKey === key ? " citation-row-selected" : ""}`} href={href} target="_blank" rel="noopener noreferrer" key={source.chunk_id} onClick={() => setSelectedSourceKey(key)}>{contents}</a>
+                    : <Link className={`citation-row${selectedSourceKey === key ? " citation-row-selected" : ""}`} href={`/documents/${encodeURIComponent(source.document_id)}`} key={source.chunk_id} onClick={() => setSelectedSourceKey(key)}>{contents}</Link>;
                 }) : <div className="citation-empty">Related passages returned by retrieval will appear here.</div>
               )}
             </div>
@@ -521,7 +536,10 @@ export default function Home() {
             id="legal-question"
             className="question-textarea"
             value={query}
-            onChange={(event) => setQuery(event.target.value)}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setFollowUpLabel(null);
+            }}
             onKeyDown={(event) => {
               if (event.key === "Enter" && !event.shiftKey && mode !== "compare") {
                 event.preventDefault();

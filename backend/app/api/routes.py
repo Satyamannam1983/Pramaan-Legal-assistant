@@ -1,9 +1,11 @@
 import hashlib
+import json
 import os
 from pathlib import Path
 import logging
 import tempfile
 from fastapi import APIRouter, File, HTTPException, UploadFile
+from pymongo.errors import PyMongoError
 from app.config import settings
 from app.schemas import (
     ChatRequest,
@@ -33,6 +35,8 @@ from app.rag.document_analysis.schemas import (
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+AWS_DATA_ROOT = PROJECT_ROOT / "data" / "raw" / "aws_open_data"
 
 # Singleton services
 document_processing_service = DocumentProcessingService()
@@ -106,6 +110,133 @@ async def readiness() -> dict:
     if not await check_connection():
         raise HTTPException(status_code=503, detail="Database is unavailable.")
     return {"status": "ready"}
+
+
+@router.get("/corpus/stats")
+async def corpus_stats() -> dict:
+    """Return live indexed totals and local AWS dataset ingestion progress."""
+    try:
+        repository = DocumentRepository()
+        indexed_documents = await repository.count_documents()
+        indexed_chunks = await repository.count_chunks()
+        court_totals = {}
+        for key, label in (
+            ("supreme_court", "Supreme Court"),
+            ("high_courts", "High Court"),
+        ):
+            court_totals[key] = {
+                "documents": await repository.count_documents_for_court(label),
+                "chunks": await repository.count_chunks_for_court(label),
+            }
+
+        download_manifest_path = AWS_DATA_ROOT / "download_manifest.json"
+        download_manifest = (
+            json.loads(download_manifest_path.read_text(encoding="utf-8"))
+            if download_manifest_path.is_file()
+            else {}
+        )
+        if not isinstance(download_manifest, dict):
+            raise ValueError("Download manifest must be a JSON object.")
+        ingestion_status_path = AWS_DATA_ROOT / "ingestion_status.json"
+        ingestion_status = (
+            json.loads(ingestion_status_path.read_text(encoding="utf-8"))
+            if ingestion_status_path.is_file()
+            else {}
+        )
+        if not isinstance(ingestion_status, dict):
+            raise ValueError("Ingestion status must be a JSON object.")
+        stored_metadata_counts = download_manifest.get("metadata_records_available")
+        if stored_metadata_counts is None:
+            metadata_counts = {"supreme_court": None, "high_courts": None}
+            total_metadata_records = None
+        elif not isinstance(stored_metadata_counts, dict):
+            raise ValueError("Metadata counts must be a JSON object.")
+        else:
+            metadata_counts = {}
+            for dataset in ("supreme_court", "high_courts"):
+                value = stored_metadata_counts.get(dataset)
+                if value is not None and (
+                    not isinstance(value, int) or isinstance(value, bool) or value < 0
+                ):
+                    raise ValueError("Metadata record counts must be non-negative integers.")
+                metadata_counts[dataset] = value
+            total_metadata_records = (
+                sum(metadata_counts.values())
+                if all(value is not None for value in metadata_counts.values())
+                else None
+            )
+        coverage = download_manifest.get("archive_coverage", {})
+        if not isinstance(coverage, dict):
+            raise ValueError("Archive coverage must be a JSON object.")
+        supreme_years = coverage.get("supreme_court_english_years", [])
+        high_court_archives = coverage.get("high_court_year_courts", [])
+        if not isinstance(supreme_years, list) or any(
+            not isinstance(year, int) or isinstance(year, bool) for year in supreme_years
+        ):
+            raise ValueError("Supreme Court archive years must be integers.")
+        if not isinstance(high_court_archives, list) or any(
+            not isinstance(item, dict)
+            or not isinstance(item.get("year"), int)
+            or isinstance(item.get("year"), bool)
+            or not isinstance(item.get("court_id"), str)
+            for item in high_court_archives
+        ):
+            raise ValueError("High Court archive coverage is invalid.")
+
+        archive_count = sum(
+            1
+            for path in AWS_DATA_ROOT.rglob("*.tar")
+            if path.is_file()
+        )
+        extracted_pdf_ids = set()
+        supreme_pdf_roots = (
+            AWS_DATA_ROOT / "supreme_court" / "extracted",
+            PROJECT_ROOT / "data" / "raw" / "supreme_court_english_2023_batch" / "pdfs",
+        )
+        for root in supreme_pdf_roots:
+            if root.exists():
+                extracted_pdf_ids.update(
+                    ("supreme_court", path.name.casefold())
+                    for path in root.rglob("*.pdf")
+                    if path.is_file()
+                )
+        high_court_pdf_root = AWS_DATA_ROOT / "high_courts" / "extracted"
+        if high_court_pdf_root.exists():
+            extracted_pdf_ids.update(
+                ("high_courts", path.relative_to(high_court_pdf_root).as_posix().casefold())
+                for path in high_court_pdf_root.rglob("*.pdf")
+                if path.is_file()
+            )
+        extracted_pdf_count = len(extracted_pdf_ids)
+        return {
+            "metadata_records_available": total_metadata_records,
+            "metadata_records_by_dataset": metadata_counts,
+            "archive_coverage": {
+                "supreme_court_english_years": supreme_years,
+                "high_court_year_courts": high_court_archives,
+            },
+            "archives_downloaded": archive_count,
+            "pdfs_extracted": extracted_pdf_count,
+            "indexed_documents": indexed_documents,
+            "indexed_chunks": indexed_chunks,
+            "indexed_by_court": court_totals,
+            "ingestion": {
+                "status": ingestion_status.get("status", "not_started"),
+                "documents_processed": int(ingestion_status.get("documents_processed", 0)),
+                "documents_to_index": int(ingestion_status.get("documents_to_index", 0)),
+                "documents_indexed": int(ingestion_status.get("documents_indexed", 0)),
+                "chunks_indexed": int(ingestion_status.get("chunks_indexed", 0)),
+                "duplicates_skipped": int(ingestion_status.get("duplicates_skipped", 0)),
+                "failed_documents": int(ingestion_status.get("failed_documents", 0)),
+                "pending_documents": int(ingestion_status.get("pending_documents", 0)),
+            },
+        }
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        logger.warning("Corpus statistics unavailable (error_type=%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Corpus statistics are unavailable.") from None
+    except PyMongoError as exc:
+        logger.warning("Corpus database counts failed (error_type=%s).", type(exc).__name__)
+        raise HTTPException(status_code=503, detail="Corpus statistics are unavailable.") from None
 
 
 @router.get("/evaluation")
@@ -566,7 +697,11 @@ async def ask_document(document_id: str, request: DocumentQuestion) -> ChatRespo
                 answer="I couldn't find sufficient evidence in this document to answer reliably.",
                 limitations=["No relevant indexed evidence was found in the requested document."],
             )
-        answer = await _get_rag_service().answer(request.query, search_results=results)
+        answer = await _get_rag_service().answer(
+            request.query,
+            search_results=results,
+            follow_up=request.follow_up,
+        )
         return ChatResponse(
             answer=answer.answer, key_points=answer.key_points,
             citations=[CitationRef.model_validate(c.model_dump()) for c in answer.citations],

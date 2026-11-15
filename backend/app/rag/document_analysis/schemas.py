@@ -57,6 +57,7 @@ class DocumentSummary(BaseModel):
 
 class DocumentQuestion(BaseModel):
     query: str = Field(min_length=1, max_length=4000)
+    follow_up: bool = False
 
 
 class CompareRequest(BaseModel):

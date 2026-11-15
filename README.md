@@ -105,6 +105,7 @@ run separate vector-only, BM25-only, or reranker ablation benchmarks.
 # 1. Copy env vars
 Copy-Item .env.example .env
 # Edit .env and set DATABASE_URL to your MongoDB local or Atlas connection string
+# Settings load this repository-root .env regardless of the current directory; environment variables take precedence.
 
 # 2. Start MongoDB
 docker compose up db -d
@@ -224,6 +225,32 @@ PDFs are excluded from Git; obtain them again using the documented object paths.
 Atlas vector retrieval additionally requires `ATLAS_VECTOR_SEARCH=true` and a
 Search index named `embedding_index` on `document_chunks.embedding`, with the
 configured embedding dimension.
+
+### Resumable AWS Open Data court ingestion
+
+The bounded downloader resumes object-by-object and preserves existing files.
+By default it downloads English Supreme Court archives and their JSON metadata
+for 2010–2026, plus the 2023 Uttarakhand High Court archive and its index. It
+checks available disk space, reserves 5 GiB, verifies archive sizes and TAR
+headers, and writes `data/raw/aws_open_data/download_manifest.json`. TLS
+certificate verification stays enabled; do not use `--no-verify-ssl`.
+
+Run from the repository root:
+
+```powershell
+python scripts/download_aws_judgments.py
+python scripts/ingest_aws_judgments.py --extract-only
+python scripts/ingest_aws_judgments.py --index-only
+```
+
+The ingestion command safely extracts PDFs, validates their signatures,
+reuses `DocumentProcessingService` and the configured chunker/embeddings, then
+inserts only documents not already present in MongoDB. TAR extraction and
+document indexing can be rerun after interruption. Progress and per-file
+failures are recorded under `data/raw/aws_open_data/`; the dashboard reads
+live indexed totals from `GET /api/corpus/stats`. MongoDB must be reachable for
+the indexing step. This repository's current vector/chunk store is MongoDB;
+the ingestion scripts do not create or replace a Qdrant collection.
 
 ---
 
@@ -391,6 +418,7 @@ All routes are available under both `/api` and `/api/v1`:
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/health` | Health check (shows DB, embedding, reranker config) |
+| GET | `/api/corpus/stats` | Live indexed totals, source breakdown, and ingestion progress |
 | POST | `/api/search` | Hybrid search with multi-signal scores |
 | POST | `/api/search/debug` | Debug endpoint exposing all retrieval stages |
 | POST | `/api/search/semantic` | Legacy vector-only semantic search |

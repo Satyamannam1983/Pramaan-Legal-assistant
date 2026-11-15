@@ -17,8 +17,10 @@ try {
     "--types", "node",
     "--outDir", outputDir,
     "lib/api.ts",
+    "lib/chat-session.ts",
     "lib/follow-up.ts",
     "tests/api.test.ts",
+    "tests/chat-session.test.ts",
     "tests/follow-ups.test.ts",
   ], { cwd: frontendDir, stdio: "inherit" });
   if (compile.status !== 0) process.exitCode = compile.status ?? 1;
@@ -26,6 +28,7 @@ try {
     const testRun = spawnSync(process.execPath, [
       "--test",
       path.join(outputDir, "tests", "api.test.js"),
+      path.join(outputDir, "tests", "chat-session.test.js"),
       path.join(outputDir, "tests", "follow-ups.test.js"),
     ], { cwd: frontendDir, stdio: "inherit" });
     if (testRun.status !== 0) process.exitCode = testRun.status ?? 1;

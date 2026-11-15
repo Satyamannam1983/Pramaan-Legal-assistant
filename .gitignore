@@ -8,9 +8,16 @@ node_modules/
 dist/
 coverage/
 *.log
+*.tsbuildinfo
 data/uploads/*
 data/processed/*
 data/raw/supreme_court_english/
+data/raw/supreme_court_english_2023_batch/
+data/raw/aws_open_data/
 !data/uploads/.gitkeep
 !data/processed/.gitkeep
+/english.index.json
+/english.tar.*
+/english_download.tar.*
+/metadata.parquet
 .DS_Store

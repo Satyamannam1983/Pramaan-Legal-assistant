@@ -120,8 +120,20 @@ Confidence levels:
 
         return "\n\n".join(parts)
 
-    def build_user_prompt(self, query: str, context: str) -> str:
+    def build_user_prompt(
+        self,
+        query: str,
+        context: str,
+        is_follow_up: bool = False,
+    ) -> str:
         """Build the user prompt combining the query and evidence context."""
+        follow_up_instruction = (
+            "This is a follow-up question. Address the specific aspect asked; "
+            "do not repeat the prior answer. Distinguish what the source states "
+            "from what it does not address, and do not infer missing details.\n\n"
+            if is_follow_up
+            else ""
+        )
         if not context:
             return (
                 f"Question: {query}\n\n"
@@ -132,5 +144,6 @@ Confidence levels:
         return (
             f"Question: {query}\n\n"
             f"[SOURCES]\n{context}\n[/SOURCES]\n\n"
+            f"{follow_up_instruction}"
             "Based ONLY on the sources above, provide your answer as a JSON object."
         )

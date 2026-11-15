@@ -27,6 +27,7 @@ export default function DocumentDetailPage() {
   const [documentError, setDocumentError] = useState("");
   const [analysisError, setAnalysisError] = useState("");
   const [query, setQuery] = useState("");
+  const [followUpPending, setFollowUpPending] = useState(false);
   const [askedQuery, setAskedQuery] = useState("");
   const [answer, setAnswer] = useState<ChatResponse | null>(null);
   const [asking, setAsking] = useState(false);
@@ -40,6 +41,7 @@ export default function DocumentDetailPage() {
     setAnalysis(null);
     setAnswer(null);
     setQuery("");
+    setFollowUpPending(false);
     setAskedQuery("");
     setAsking(false);
     setQuestionError("");
@@ -84,16 +86,32 @@ export default function DocumentDetailPage() {
       if (!trimmed) setQuestionError("Enter a question about this document.");
       return;
     }
+    await askQuestion(trimmed, trimmed, followUpPending);
+  }
+
+  async function askQuestion(submittedQuery: string, visibleQuestion: string, isFollowUp: boolean) {
+    if (!submittedQuery || asking) return;
     questionController.current?.abort();
     const controller = new AbortController();
     questionController.current = controller;
     setAsking(true);
     setQuestionError("");
     setAnswer(null);
-    setAskedQuery(trimmed);
+    setAskedQuery(visibleQuestion);
     try {
-      const result = await askDocument(documentId, { query: trimmed }, controller.signal);
-      if (questionController.current === controller) setAnswer(result);
+      const result = await askDocument(
+        documentId,
+        {
+          query: submittedQuery,
+          ...(isFollowUp ? { follow_up: true } : {}),
+        },
+        controller.signal,
+      );
+      if (questionController.current === controller) {
+        setAnswer(result);
+        setFollowUpPending(false);
+        setQuery("");
+      }
     } catch (error) {
       if (!controller.signal.aborted && questionController.current === controller) {
         setQuestionError(getErrorMessage(error));
@@ -106,14 +124,17 @@ export default function DocumentDetailPage() {
     }
   }
 
-  function useFollowUp(prompt: { query: string }) {
-    setQuery(prompt.query);
+  function useFollowUp(prompt: { query: string; label: string }) {
+    setFollowUpPending(true);
     setQuestionError("");
-    requestAnimationFrame(() => questionInput.current?.focus());
+    void askQuestion(prompt.query, prompt.label, true);
   }
 
-  const followUpPrompts = answer
-    ? buildFollowUpPrompts(answer.citations.length ? answer.citations : answer.search_results)
+  const followUpPrompts = answer && !answer.abstained
+    ? buildFollowUpPrompts(
+      answer.citations.length ? answer.citations : answer.search_results,
+      answer.answer,
+    )
     : [];
 
   return (

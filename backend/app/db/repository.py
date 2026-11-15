@@ -19,6 +19,7 @@ import logging
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+import re
 from typing import Any
 
 import numpy as np
@@ -402,4 +403,14 @@ class DocumentRepository:
     async def count_chunks(self, document_id: str | None = None) -> int:
         return await self._db[CHUNKS_COLLECTION].count_documents(
             {"document_id": document_id} if document_id else {}
+        )
+
+    async def count_documents_for_court(self, court_name: str) -> int:
+        return await self._db[DOCUMENTS_COLLECTION].count_documents(
+            {"court": {"$regex": re.escape(court_name), "$options": "i"}}
+        )
+
+    async def count_chunks_for_court(self, court_name: str) -> int:
+        return await self._db[CHUNKS_COLLECTION].count_documents(
+            {"court": {"$regex": re.escape(court_name), "$options": "i"}}
         )

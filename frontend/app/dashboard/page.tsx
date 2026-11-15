@@ -4,7 +4,13 @@ import { useEffect, useState } from "react";
 import Link from "next/link";
 import { AppShell } from "../../components/AppShell";
 import { PageHeader } from "../../components/PageHeader";
-import { getErrorMessage, listDocuments, type DocumentSummary } from "../../lib/api";
+import {
+  getCorpusStats,
+  getErrorMessage,
+  listDocuments,
+  type CorpusStats,
+  type DocumentSummary,
+} from "../../lib/api";
 
 function recentFirst(documents: DocumentSummary[]) {
   return [...documents].sort((left, right) => {
@@ -20,13 +26,45 @@ function displayDate(value: string | null) {
   return Number.isNaN(parsed.getTime()) ? "Date unavailable" : parsed.toLocaleDateString();
 }
 
+function formatYearCoverage(years: number[]) {
+  const sorted = Array.from(new Set(years)).sort((left, right) => left - right);
+  if (!sorted.length) return "not recorded";
+  const ranges: Array<[number, number]> = [];
+  for (const year of sorted) {
+    const lastRange = ranges[ranges.length - 1];
+    if (lastRange && year === lastRange[1] + 1) lastRange[1] = year;
+    else ranges.push([year, year]);
+  }
+  return ranges.map(([start, end]) => start === end ? `${start}` : `${start}-${end}`).join(", ");
+}
+
 export default function DashboardPage() {
   const [documents, setDocuments] = useState<DocumentSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
+  const [statsLoading, setStatsLoading] = useState(true);
+  const [statsError, setStatsError] = useState("");
 
   useEffect(() => {
     const controller = new AbortController();
+    const refreshStats = () => {
+      getCorpusStats(controller.signal)
+        .then((result) => {
+          if (!controller.signal.aborted) {
+            setCorpusStats(result);
+            setStatsError("");
+          }
+        })
+        .catch((failure: unknown) => {
+          if (!controller.signal.aborted) setStatsError(getErrorMessage(failure));
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setStatsLoading(false);
+        });
+    };
+    refreshStats();
+    const statsInterval = window.setInterval(refreshStats, 10_000);
     listDocuments(controller.signal)
       .then((result) => {
         if (!controller.signal.aborted) setDocuments(result);
@@ -37,10 +75,18 @@ export default function DashboardPage() {
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    return () => controller.abort();
+    return () => {
+      window.clearInterval(statsInterval);
+      controller.abort();
+    };
   }, []);
 
   const recentDocuments = recentFirst(documents);
+  const metricValue = (value: number | null | undefined) => {
+    if (statsLoading) return "—";
+    if (statsError || value === undefined) return "Unavailable";
+    return value === null ? "Not counted" : value.toLocaleString();
+  };
 
   return (
     <AppShell>
@@ -54,12 +100,68 @@ export default function DashboardPage() {
 
         {error && <p className="assistant-error" role="alert">{error}</p>}
 
-        <section aria-label="Indexed document count" className="dashboard-metric">
-          <p className="dashboard-metric-label">Indexed documents</p>
-          <p className="dashboard-metric-value" aria-live="polite">
-            {loading ? "—" : error ? "Unavailable" : documents.length}
-          </p>
-          <p className="helper-text">Documents available to the current retrieval workspace</p>
+        <section aria-labelledby="corpus-stats-heading" className="corpus-overview">
+          <div className="corpus-overview-heading">
+            <div>
+              <h2 id="corpus-stats-heading" className="dashboard-section-title">Legal corpus</h2>
+              <p className="helper-text">Live totals from the existing document index and local ingestion status.</p>
+            </div>
+            {corpusStats && (
+              <span className="corpus-status" role="status">
+                Ingestion: {corpusStats.ingestion.status.replace(/_/g, " ")}
+              </span>
+            )}
+          </div>
+          {statsError && <p className="assistant-error" role="alert">{statsError}</p>}
+          <div className="corpus-metrics" aria-live="polite">
+            <article className="corpus-metric-card">
+              <p className="corpus-metric-label">Indexed documents</p>
+              <p className="corpus-metric-value">{metricValue(corpusStats?.indexed_documents)}</p>
+            </article>
+            <article className="corpus-metric-card">
+              <p className="corpus-metric-label">Indexed chunks</p>
+              <p className="corpus-metric-value">{metricValue(corpusStats?.indexed_chunks)}</p>
+            </article>
+            <article className="corpus-metric-card">
+              <p className="corpus-metric-label">Available metadata records</p>
+              <p className="corpus-metric-value">{metricValue(corpusStats?.metadata_records_available)}</p>
+            </article>
+            <article className="corpus-metric-card">
+              <p className="corpus-metric-label">Downloaded archives</p>
+              <p className="corpus-metric-value">{metricValue(corpusStats?.archives_downloaded)}</p>
+            </article>
+            <article className="corpus-metric-card">
+              <p className="corpus-metric-label">Extracted PDFs</p>
+              <p className="corpus-metric-value">{metricValue(corpusStats?.pdfs_extracted)}</p>
+            </article>
+          </div>
+          <div className="corpus-breakdown">
+            <div>
+              <strong>Supreme Court</strong>
+              <span>{metricValue(corpusStats?.indexed_by_court.supreme_court.documents)} documents · {metricValue(corpusStats?.indexed_by_court.supreme_court.chunks)} chunks</span>
+            </div>
+            <div>
+              <strong>High Courts</strong>
+              <span>{metricValue(corpusStats?.indexed_by_court.high_courts.documents)} documents · {metricValue(corpusStats?.indexed_by_court.high_courts.chunks)} chunks</span>
+            </div>
+          </div>
+          {corpusStats && (
+            <p className="corpus-progress">
+              Coverage: Supreme Court English {formatYearCoverage(corpusStats.archive_coverage.supreme_court_english_years)}
+              {" · "}High Court archives: {corpusStats.archive_coverage.high_court_year_courts.length
+                ? corpusStats.archive_coverage.high_court_year_courts.map((archive) => `${archive.year} (court ${archive.court_id})`).join(", ")
+                : "not recorded"}
+            </p>
+          )}
+          {corpusStats && (
+            <p className="corpus-progress">
+              Processing {corpusStats.ingestion.documents_processed.toLocaleString()} of {corpusStats.ingestion.documents_to_index.toLocaleString()}
+              {" · "}{corpusStats.ingestion.failed_documents.toLocaleString()} failed
+              {" · "}{corpusStats.ingestion.duplicates_skipped.toLocaleString()} duplicates skipped
+              {" · "}{corpusStats.ingestion.pending_documents.toLocaleString()} pending
+              {" · "}metadata: {metricValue(corpusStats.metadata_records_by_dataset.supreme_court)} Supreme Court, {metricValue(corpusStats.metadata_records_by_dataset.high_courts)} High Courts
+            </p>
+          )}
         </section>
 
         <div className="dashboard-grid" style={{ marginTop: 30 }}>

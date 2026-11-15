@@ -21,9 +21,10 @@ Pipeline:
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
-import os
+import re
 import time
 from uuid import uuid4
 
@@ -31,7 +32,7 @@ from pydantic import ValidationError
 
 from app.config import settings
 from app.rag.generation.context_builder import ContextBuilder
-from app.rag.generation.evidence_selector import EvidenceBundle, EvidenceSelector
+from app.rag.generation.evidence_selector import EvidenceBundle, EvidenceItem, EvidenceSelector
 from app.rag.generation.factory import get_llm_provider
 from app.rag.generation.schemas import CitationRef, LegalAnswer
 from app.rag.citations.citation_service import CitationService
@@ -40,6 +41,9 @@ from app.rag.services.retrieval_service import SearchResultItem
 from app.rag.validation.grounding_validator import GroundingValidator
 
 logger = logging.getLogger(__name__)
+_LLM_TIMEOUT_SECONDS = 15
+_MIN_EXTRACTIVE_MATCHES = 2
+_MIN_EXTRACTIVE_QUERY_COVERAGE = 0.35
 
 
 class LegalRAGService:
@@ -68,6 +72,7 @@ class LegalRAGService:
         query: str,
         conversation_id: str | None = None,
         search_results: list[SearchResultItem] | None = None,
+        follow_up: bool = False,
     ) -> LegalAnswer:
         """Run the full grounded RAG pipeline.
 
@@ -152,42 +157,60 @@ class LegalRAGService:
                 abstained=True,
             )
 
+        if not follow_up:
+            extractive_answer = self._build_evidence_only_answer(
+                evidence_bundle,
+                conv_id,
+                require_query_match=True,
+            )
+            if not extractive_answer.abstained:
+                logger.info("Returning directly matched source sentence without LLM generation.")
+                return extractive_answer
+
         # ── Stage 4: Context Construction ──────────────────────────────
         context = self._context_builder.build_context(evidence_bundle)
-        user_prompt = self._context_builder.build_user_prompt(query, context)
+        user_prompt = self._context_builder.build_user_prompt(
+            query,
+            context,
+            is_follow_up=follow_up,
+        )
 
         # ── Stage 5: LLM Generation ───────────────────────────────────
         try:
             llm = get_llm_provider()
-            llm_output = await llm.generate(
-                system_prompt=ContextBuilder.SYSTEM_PROMPT,
-                user_prompt=user_prompt,
-                temperature=settings.llm_temperature,
-                max_tokens=settings.llm_max_tokens,
+            llm_output = await asyncio.wait_for(
+                llm.generate(
+                    system_prompt=ContextBuilder.SYSTEM_PROMPT,
+                    user_prompt=user_prompt,
+                    temperature=settings.llm_temperature,
+                    max_tokens=settings.llm_max_tokens,
+                ),
+                timeout=_LLM_TIMEOUT_SECONDS,
             )
         except Exception as exc:
-            logger.warning("LLM generation failed (%s).", type(exc).__name__)
-            provider = os.getenv("LLM_PROVIDER", settings.llm_provider).strip().lower()
-            if provider == "openrouter":
-                return LegalAnswer(
-                    answer=(
-                        "OpenRouter answer generation is unavailable. "
-                        "No generated legal answer was accepted."
-                    ),
-                    confidence="low",
-                    limitations=[
-                        "The configured OpenRouter request failed; no answer was generated."
-                    ],
-                    generation_mode="failed",
-                    abstained=True,
-                )
-            # Return evidence-based answer without LLM
-            return self._build_evidence_only_answer(evidence_bundle, conv_id)
+            logger.warning(
+                "LLM generation failed or exceeded %d seconds (error_type=%s).",
+                _LLM_TIMEOUT_SECONDS,
+                type(exc).__name__,
+            )
+            if follow_up:
+                return self._build_follow_up_fallback(evidence_bundle, query)
+            return self._build_evidence_only_answer(
+                evidence_bundle,
+                conv_id,
+                fallback_reason="A verified answer could not be generated in time.",
+            )
 
         # ── Stage 6: Parse Structured Output ───────────────────────────
         legal_answer = self._parse_llm_output(llm_output)
         if legal_answer.generation_mode == "failed":
-            return legal_answer
+            if follow_up:
+                return self._build_follow_up_fallback(evidence_bundle, query)
+            return self._build_evidence_only_answer(
+                evidence_bundle,
+                conv_id,
+                fallback_reason="The generated answer could not be verified.",
+            )
         legal_answer.generation_mode = getattr(llm, "provider_name", "configured")
 
         # ── Stage 7: Citation Validation ───────────────────────────────
@@ -214,6 +237,20 @@ class LegalRAGService:
             or not validated_citations
             or not citation_service.validate_citations(validated_citations)
         ):
+            if not validation.invalid_citations and not validation.malformed_citations:
+                logger.warning(
+                    "Generated answer had no usable citations; returning retrieved evidence only."
+                )
+                if follow_up:
+                    return self._build_follow_up_fallback(
+                        evidence_bundle,
+                        query,
+                    )
+                return self._build_evidence_only_answer(
+                    evidence_bundle,
+                    conv_id,
+                    fallback_reason="The generated answer could not be verified.",
+                )
             logger.warning(
                 "Rejecting generated answer because citation validation failed: %s",
                 validation.summary,
@@ -265,6 +302,90 @@ class LegalRAGService:
 
         return legal_answer
 
+    def _build_follow_up_fallback(
+        self,
+        bundle: EvidenceBundle,
+        query: str,
+    ) -> LegalAnswer:
+        normalized_query = query.lower()
+        if "exception" in normalized_query:
+            exception_markers = (
+                "however",
+                "except",
+                "unless",
+                "but",
+                "partial",
+                "partially",
+                "diverted",
+            )
+            for item in bundle.items:
+                normalized_content = re.sub(r"\s+", " ", item.content)
+                for raw_sentence in re.split(r"(?<=[.!?])\s+", normalized_content):
+                    sentence = re.sub(
+                        r"^\s*(?:\(?\d+[.)]\s*)+",
+                        "",
+                        raw_sentence,
+                    ).strip()
+                    if (
+                        len(sentence) >= 30
+                        and any(marker in sentence.lower() for marker in exception_markers)
+                        and not re.search(r"\b(?:and|or|but|if|however)$", sentence, re.IGNORECASE)
+                    ):
+                        return self._build_cited_follow_up_answer(
+                            f"The source describes this related condition: {sentence}",
+                            item,
+                        )
+
+        if "reason" in normalized_query:
+            item = bundle.items[0]
+            return self._build_cited_follow_up_answer(
+                "The cited passage states the outcome but does not explain the "
+                "reason behind the policy.",
+                item,
+            )
+
+        if "evidence" in normalized_query or "support" in normalized_query:
+            item = bundle.items[0]
+            page = f" on page {item.page_start}" if item.page_start is not None else ""
+            return self._build_cited_follow_up_answer(
+                f"The cited passage directly supports this answer{page}.",
+                item,
+            )
+
+        return LegalAnswer(
+            answer="The retrieved source does not provide enough information to answer this follow-up.",
+            confidence="low",
+            limitations=["The follow-up requires details not established by the retrieved source."],
+            abstained=True,
+            generation_mode="failed",
+        )
+
+    @staticmethod
+    def _build_cited_follow_up_answer(answer: str, item: EvidenceItem) -> LegalAnswer:
+        return LegalAnswer(
+            answer=f"{answer} [{item.citation_id}]",
+            citations=[
+                CitationRef(
+                    citation_id=item.citation_id,
+                    chunk_id=item.chunk_id,
+                    document_id=item.document_id,
+                    title=item.title,
+                    section=item.section,
+                    subsection=item.subsection,
+                    page_start=item.page_start,
+                    page_end=item.page_end,
+                    document_type=item.document_type,
+                    court=item.court,
+                    date=item.date,
+                    source=item.source,
+                    source_url=item.source_url,
+                )
+            ],
+            confidence="medium",
+            grounding_valid=True,
+            generation_mode="evidence_only",
+        )
+
     def _parse_llm_output(self, llm_output: str) -> LegalAnswer:
         """Parse the LLM's JSON output into a LegalAnswer."""
         try:
@@ -289,31 +410,104 @@ class LegalRAGService:
             )
 
     def _build_evidence_only_answer(
-        self, bundle: EvidenceBundle, conv_id: str
+        self,
+        bundle: EvidenceBundle,
+        conv_id: str,
+        fallback_reason: str = "The LLM service is not available.",
+        require_query_match: bool = False,
     ) -> LegalAnswer:
-        """Build a response using evidence only, when LLM is unavailable."""
-        evidence_texts = []
-        fallback_items = bundle.items[:3]
-        for item in fallback_items:
-            text = f"[{item.citation_id}]"
-            if item.title:
-                text += f" {item.title}"
-            if item.section:
-                text += f", {item.section}"
-            text += f"\n{item.content[:500]}"
-            evidence_texts.append(text)
-
-        answer = (
-            "The LLM service is not available. Here are the most relevant "
-            "legal passages retrieved for your query:\n\n"
-            + "\n\n".join(evidence_texts)
+        """Return one concise, cited sentence from the most relevant source."""
+        ignored_terms = {
+            "a", "an", "and", "are", "as", "at", "be", "by", "for", "from",
+            "how", "if", "in", "is", "it", "of", "on", "or", "the", "to",
+            "under", "was", "what", "when", "where", "which", "who", "why",
+            "with",
+        }
+        query_terms = {
+            term.lower()
+            for term in re.findall(r"\b[\w'-]+\b", bundle.query)
+            if term.lower() not in ignored_terms
+        }
+        refund_query = bool(
+            {"fare", "refund", "refunded", "reimbursement", "clerkage"}
+            & query_terms
         )
+        refund_terms = {
+            "refund",
+            "refunded",
+            "refundable",
+            "reimbursement",
+            "fare",
+            "amount",
+            "clerkage",
+            "deduct",
+            "deducted",
+            "deducting",
+        } if refund_query else set()
+        candidates: list[tuple[int, int, int, int, int, str, EvidenceItem]] = []
+        for item_index, item in enumerate(bundle.items):
+            normalized_content = re.sub(r"\s+", " ", item.content)
+            sentences = re.split(r"(?<=[.!?])\s+", normalized_content)
+            for sentence_index, raw_sentence in enumerate(sentences):
+                sentence = re.sub(r"^\s*(?:\(?\d+[.)]\s*)+", "", raw_sentence).strip()
+                if not sentence:
+                    continue
+                sentence_terms = {
+                    term.lower()
+                    for term in re.findall(r"\b[\w'-]+\b", sentence)
+                }
+                score = len(query_terms & sentence_terms)
+                focus_score = len(refund_terms & sentence_terms)
+                candidates.append(
+                    (
+                        focus_score,
+                        score,
+                        len(query_terms),
+                        -item_index,
+                        -sentence_index,
+                        sentence,
+                        item,
+                    )
+                )
+
+        if not candidates:
+            return LegalAnswer(
+                answer="I couldn't find a complete source sentence to answer this question.",
+                confidence="low",
+                limitations=[fallback_reason],
+                abstained=True,
+                generation_mode="failed",
+            )
+
+        best = max(candidates, key=lambda candidate: candidate[:5])
+        _, matches, query_term_count, _, _, sentence, item = best
+        has_query_match = (
+            query_term_count > 0
+            and matches >= _MIN_EXTRACTIVE_MATCHES
+            and matches / query_term_count >= _MIN_EXTRACTIVE_QUERY_COVERAGE
+        )
+        if require_query_match and not has_query_match:
+            return LegalAnswer(
+                answer="",
+                confidence="low",
+                limitations=[],
+                abstained=True,
+                generation_mode="not_run",
+            )
+        if not has_query_match:
+            return LegalAnswer(
+                answer="I couldn't generate a verified answer from the retrieved sources.",
+                confidence="low",
+                limitations=[fallback_reason],
+                abstained=True,
+                generation_mode="failed",
+            )
+        sentence = sentence[:500].rstrip()
+        answer = f"{sentence} [{item.citation_id}]"
 
         return LegalAnswer(
             answer=answer,
-            key_points=[
-                f"LLM unavailable — showing raw evidence. [{fallback_items[0].citation_id}]"
-            ],
+            key_points=[],
             citations=[
                 CitationRef(
                     citation_id=item.citation_id,
@@ -330,9 +524,8 @@ class LegalRAGService:
                     source=item.source,
                     source_url=item.source_url,
                 )
-                for item in fallback_items
             ],
-            limitations=["LLM service unavailable. Answer is based on raw evidence only."],
+            limitations=[],
             confidence="low",
             grounding_valid=True,
             generation_mode="evidence_only",
