@@ -5,6 +5,7 @@ import Link from "next/link";
 import { AppShell } from "../../components/AppShell";
 import { PageHeader } from "../../components/PageHeader";
 import {
+  getApiHealth,
   getCorpusStats,
   getErrorMessage,
   listDocuments,
@@ -45,9 +46,25 @@ export default function DashboardPage() {
   const [corpusStats, setCorpusStats] = useState<CorpusStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
   const [statsError, setStatsError] = useState("");
+  const [databaseStatus, setDatabaseStatus] = useState<
+    "checking" | "connected" | "unavailable"
+  >("checking");
 
   useEffect(() => {
     const controller = new AbortController();
+    const refreshHealth = () => {
+      getApiHealth(controller.signal)
+        .then((result) => {
+          if (!controller.signal.aborted) {
+            setDatabaseStatus(
+              result.database === "connected" ? "connected" : "unavailable",
+            );
+          }
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setDatabaseStatus("unavailable");
+        });
+    };
     const refreshStats = () => {
       getCorpusStats(controller.signal)
         .then((result) => {
@@ -63,7 +80,9 @@ export default function DashboardPage() {
           if (!controller.signal.aborted) setStatsLoading(false);
         });
     };
+    refreshHealth();
     refreshStats();
+    const healthInterval = window.setInterval(refreshHealth, 10_000);
     const statsInterval = window.setInterval(refreshStats, 10_000);
     listDocuments(controller.signal)
       .then((result) => {
@@ -76,6 +95,7 @@ export default function DashboardPage() {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => {
+      window.clearInterval(healthInterval);
       window.clearInterval(statsInterval);
       controller.abort();
     };
@@ -106,11 +126,16 @@ export default function DashboardPage() {
               <h2 id="corpus-stats-heading" className="dashboard-section-title">Legal corpus</h2>
               <p className="helper-text">Live totals from the existing document index and local ingestion status.</p>
             </div>
-            {corpusStats && (
-              <span className="corpus-status" role="status">
-                Ingestion: {corpusStats.ingestion.status.replace(/_/g, " ")}
+            <div className="corpus-status-group">
+              <span className="corpus-status" role="status" aria-live="polite">
+                Database: {databaseStatus}
               </span>
-            )}
+              {corpusStats && (
+                <span className="corpus-status" role="status">
+                  Ingestion: {corpusStats.ingestion.status.replace(/_/g, " ")}
+                </span>
+              )}
+            </div>
           </div>
           {statsError && <p className="assistant-error" role="alert">{statsError}</p>}
           <div className="corpus-metrics" aria-live="polite">

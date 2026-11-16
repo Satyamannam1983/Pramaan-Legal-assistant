@@ -75,6 +75,11 @@ export type SearchResponse = {
   results: SearchResult[];
 };
 
+export type ApiHealth = {
+  status: string;
+  database: string;
+};
+
 export type DocumentQuestionRequest = {
   query: string;
   follow_up?: boolean;
@@ -335,6 +340,10 @@ export function listDocuments(signal?: AbortSignal) {
 
 export function getCorpusStats(signal?: AbortSignal) {
   return requestJson<CorpusStats>("/corpus/stats", { signal });
+}
+
+export function getApiHealth(signal?: AbortSignal) {
+  return requestJson<ApiHealth>("/health", { signal });
 }
 
 export function getDocument(documentId: string, signal?: AbortSignal) {

@@ -94,18 +94,21 @@ async def lifespan(app: FastAPI):
         await init_db()
         logger.info("MongoDB ready")
     except Exception as exc:  # noqa: BLE001
+        from app.db.connection import connection_failure_reason  # noqa: PLC0415
         if settings.app_env.lower() == "production":
             logger.error(
-                "MongoDB initialisation failed in production (error_type=%s).",
+                "MongoDB initialisation failed in production (error_type=%s, reason=%s).",
                 type(exc).__name__,
+                connection_failure_reason(exc),
             )
             from app.db.connection import close_connection  # noqa: PLC0415
             await close_connection()
             raise RuntimeError("MongoDB initialisation failed.") from None
         # Allow app to start even without DB (stub mode, local testing)
         logger.warning(
-            "MongoDB initialisation skipped (error_type=%s).",
+            "MongoDB initialisation skipped (error_type=%s, reason=%s).",
             type(exc).__name__,
+            connection_failure_reason(exc),
         )
     yield
     # Shutdown

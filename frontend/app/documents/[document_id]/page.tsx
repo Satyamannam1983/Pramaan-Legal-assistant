@@ -124,7 +124,7 @@ export default function DocumentDetailPage() {
     }
   }
 
-  function useFollowUp(prompt: { query: string; label: string }) {
+  function handleFollowUp(prompt: { query: string; label: string }) {
     setFollowUpPending(true);
     setQuestionError("");
     void askQuestion(prompt.query, prompt.label, true);
@@ -227,7 +227,7 @@ export default function DocumentDetailPage() {
                             type="button"
                             key={`${prompt.documentId}:${prompt.label}`}
                             className="follow-up-button"
-                            onClick={() => useFollowUp(prompt)}
+                            onClick={() => handleFollowUp(prompt)}
                             disabled={asking}
                           >
                             {prompt.label}

@@ -7,6 +7,7 @@ import pytest
 from pydantic import ValidationError
 
 from app.config import Settings
+from app.db.connection import connection_failure_reason
 from app.main import RequestSizeLimitMiddleware
 
 
@@ -20,6 +21,24 @@ def test_settings_accept_local_defaults():
 def test_settings_accept_atlas_vector_search_configuration():
     settings = Settings(_env_file=None, atlas_vector_search=True)
     assert settings.atlas_vector_search is True
+
+
+def test_settings_env_file_is_repository_root_relative():
+    expected = Path(__file__).resolve().parents[2] / ".env"
+    assert Path(Settings.model_config["env_file"]) == expected
+
+
+def test_connection_failure_diagnosis_is_useful_and_does_not_expose_uri():
+    from pymongo.errors import ServerSelectionTimeoutError
+
+    failure = ServerSelectionTimeoutError(
+        "SSL handshake failed for mongodb://pramaan-user:private-password@atlas.example"
+    )
+    reason = connection_failure_reason(failure)
+
+    assert "TLS negotiation failed" in reason
+    assert "private-password" not in reason
+    assert "atlas.example" not in reason
 
 
 @pytest.mark.asyncio

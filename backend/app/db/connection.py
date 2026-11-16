@@ -9,9 +9,11 @@ Atlas:       mongodb+srv://user:password@cluster.mongodb.net/pramaan
 from __future__ import annotations
 
 import logging
+import ssl
 from urllib.parse import urlparse
 
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from pymongo.errors import ServerSelectionTimeoutError
 
 from app.config import settings
 
@@ -22,6 +24,38 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 _client: AsyncIOMotorClient | None = None
 _db: AsyncIOMotorDatabase | None = None
+
+
+def connection_failure_reason(exc: Exception) -> str:
+    """Return a credential-free diagnosis suitable for logs and status output."""
+    message = str(exc).casefold()
+    errors = getattr(exc, "errors", None)
+    if isinstance(errors, dict):
+        message += " " + " ".join(
+            str(error).casefold() for error in errors.values()
+        )
+
+    if (
+        isinstance(exc, ssl.SSLError)
+        or "ssl handshake failed" in message
+        or "tlsv1_alert" in message
+    ):
+        return (
+            "TLS negotiation failed before MongoDB authentication; check the "
+            "network TLS path and Atlas availability."
+        )
+    if "certificate verify failed" in message:
+        return "TLS certificate validation failed; verify the system trust chain without disabling TLS verification."
+    if "authentication failed" in message or "bad auth" in message:
+        return "MongoDB rejected authentication; verify the database user and encoded URI credentials."
+    if "not authorized" in message or "unauthorized" in message:
+        return "MongoDB authentication succeeded but the user lacks required database permissions."
+    if isinstance(exc, ServerSelectionTimeoutError):
+        return (
+            "No MongoDB server was selected; check cluster state, DNS, Atlas "
+            "Network Access, and outbound TCP port 27017."
+        )
+    return "MongoDB initialization failed; check database availability, user permissions, and index compatibility."
 
 
 def _resolve_db_name() -> str:
@@ -91,8 +125,9 @@ async def check_connection() -> bool:
         return True
     except Exception as exc:  # noqa: BLE001
         logger.warning(
-            "MongoDB health check failed (error_type=%s).",
+            "MongoDB health check failed (error_type=%s, reason=%s).",
             type(exc).__name__,
+            connection_failure_reason(exc),
         )
         return False
 

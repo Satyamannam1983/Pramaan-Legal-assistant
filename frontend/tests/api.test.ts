@@ -6,6 +6,7 @@ import {
   askDocument,
   askQuestion,
   compareDocuments,
+  getApiHealth,
   getEvaluationReport,
   requestJson,
   safeSourceUrl,
@@ -175,4 +176,17 @@ test("evaluation API preserves stage statuses without inventing metrics", async 
   assert.equal(response.dataset_size, 7);
   assert.equal(response.evaluations?.retrieval.status, "NOT RUN");
   assert.deepEqual(response.evaluations?.retrieval.metrics, {});
+});
+
+test("database health uses the existing health endpoint", async () => {
+  let requestedUrl = "";
+  globalThis.fetch = async (input) => {
+    requestedUrl = String(input);
+    return Response.json({ status: "ok", database: "connected" });
+  };
+
+  const health = await getApiHealth();
+
+  assert.match(requestedUrl, /\/api\/health$/);
+  assert.equal(health.database, "connected");
 });

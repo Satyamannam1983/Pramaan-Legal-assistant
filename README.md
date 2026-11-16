@@ -104,7 +104,7 @@ run separate vector-only, BM25-only, or reranker ablation benchmarks.
 ```powershell
 # 1. Copy env vars
 Copy-Item .env.example .env
-# Edit .env and set DATABASE_URL to your MongoDB local or Atlas connection string
+# DATABASE_URL defaults to local MongoDB; keep any saved Atlas URI in ATLAS_DATABASE_URL.
 # Settings load this repository-root .env regardless of the current directory; environment variables take precedence.
 
 # 2. Start MongoDB
@@ -186,7 +186,7 @@ Reads JSONL files, generates embeddings (downloads model on first run), inserts 
 
 Run both commands from the repository root. For a host-run backend, set
 `DATABASE_URL` to a host-reachable MongoDB URI (the `.env.example` default is
-`localhost`). For the Compose API container, set `COMPOSE_DATABASE_URL` to a
+`127.0.0.1`). For the Compose API container, set `COMPOSE_DATABASE_URL` to a
 container-reachable MongoDB URI (the default is `mongodb://db:27017/pramaan`).
 Indexing must complete successfully before documents can be searched; an
 upload accepted while MongoDB is unavailable is stored locally and reports
@@ -532,7 +532,8 @@ integration test.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `mongodb://localhost:27017/pramaan` | MongoDB connection string |
+| `DATABASE_URL` | `mongodb://127.0.0.1:27017/pramaan` | MongoDB connection string |
+| `ATLAS_DATABASE_URL` | — | Optional separately saved Atlas URI; credentials should remain private |
 | `COMPOSE_DATABASE_URL` | `mongodb://db:27017/pramaan` | API-container URI used by Docker Compose |
 | `DATABASE_NAME` | `pramaan` | Database name for local indexing |
 | `ATLAS_VECTOR_SEARCH` | `false` | Enable MongoDB Atlas vector search |

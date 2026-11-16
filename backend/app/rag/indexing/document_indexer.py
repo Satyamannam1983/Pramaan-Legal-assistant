@@ -5,8 +5,8 @@ Pipeline
 data/processed/*.jsonl
     ↓  load chunks from JSONL
     ↓  generate embeddings (batched)
-    ↓  upsert document record (MongoDB)
     ↓  upsert chunks + embeddings (MongoDB)
+    ↓  upsert document record after chunks persist (MongoDB)
 """
 from __future__ import annotations
 
@@ -168,9 +168,9 @@ class DocumentIndexer:
         document: DocumentData,
         chunks: list[ChunkData],
     ) -> None:
-        await repository.upsert_document(document)
         if chunks:
             await repository.upsert_chunks(chunks)
+        await repository.upsert_document(document)
         await repository.delete_stale_chunks(
             document.document_id,
             [chunk.chunk_id for chunk in chunks],

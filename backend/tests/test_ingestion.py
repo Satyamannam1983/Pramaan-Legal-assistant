@@ -327,3 +327,37 @@ async def test_indexing_failure_is_propagated_without_stale_cleanup(monkeypatch)
 
     with pytest.raises(RuntimeError, match="database write failed"):
         await indexer.index_record(record)
+
+
+@pytest.mark.asyncio
+async def test_new_document_is_not_published_before_all_chunks_are_persisted(monkeypatch):
+    from app.rag.indexing import document_indexer
+
+    class FakeEmbeddingService:
+        def embed_documents(self, texts):
+            return [[0.1] for _ in texts]
+
+    class FailingRepository:
+        document_published = False
+
+        async def upsert_chunks(self, chunks):
+            raise RuntimeError("partial chunk write")
+
+        async def upsert_document(self, document):
+            self.document_published = True
+
+        async def delete_stale_chunks(self, document_id, keep_chunk_ids):
+            pytest.fail("Partial chunk writes must not trigger stale cleanup.")
+
+    repository = FailingRepository()
+    monkeypatch.setattr(document_indexer, "DocumentRepository", lambda: repository)
+    indexer = document_indexer.DocumentIndexer(embedding_service=FakeEmbeddingService())
+    record = {
+        "metadata": {"document_id": "source-2", "metadata": {}},
+        "all_chunks": [{"chunk_id": "source-2:0", "content": "text", "chunk_index": 0}],
+    }
+
+    with pytest.raises(RuntimeError, match="partial chunk write"):
+        await indexer.index_record(record)
+
+    assert not repository.document_published

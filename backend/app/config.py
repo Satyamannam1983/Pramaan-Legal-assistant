@@ -27,7 +27,7 @@ class Settings(BaseSettings):
     embedding_batch_size: int = 32
 
     # Database (MongoDB)
-    database_url: str = "mongodb://localhost:27017/pramaan"
+    database_url: str = "mongodb://127.0.0.1:27017/pramaan"
     database_name: str = "pramaan"
     atlas_vector_search: bool = False
 

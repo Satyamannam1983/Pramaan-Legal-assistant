@@ -24,6 +24,7 @@ from typing import Any
 
 import numpy as np
 from motor.motor_asyncio import AsyncIOMotorDatabase
+from pymongo.errors import OperationFailure
 
 from app.config import settings
 from app.db.connection import get_db
@@ -237,7 +238,16 @@ class DocumentRepository:
         MongoDB Atlas: uses $vectorSearch aggregation pipeline.
         """
         if _USE_ATLAS:
-            return await self._atlas_vector_search(query_embedding, top_k, document_id)
+            try:
+                return await self._atlas_vector_search(
+                    query_embedding, top_k, document_id
+                )
+            except OperationFailure as exc:
+                if exc.code != 31082:
+                    raise
+                logger.warning(
+                    "MongoDB Search is unavailable; using local cosine retrieval."
+                )
         return await self._python_cosine_search(query_embedding, top_k, document_id)
 
     async def _python_cosine_search(

@@ -89,7 +89,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "environment": settings.app_env,
-        "database": "connected" if db_ok else "unavailable (set DATABASE_URL in .env)",
+        "database": "connected" if db_ok else "unavailable",
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         "reranker_provider": settings.reranker_provider or "none",

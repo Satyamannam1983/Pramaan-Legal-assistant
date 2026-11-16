@@ -44,6 +44,10 @@ class DatabaseUnavailableError(RuntimeError):
     """Raised when extracted judgments cannot be indexed because MongoDB is down."""
 
 
+class BatchSafetyError(RuntimeError):
+    """Raised when a bounded batch no longer matches its preflight assumptions."""
+
+
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -63,6 +67,49 @@ def _write_status(status: dict[str, Any]) -> None:
             if attempt == 4:
                 raise
             time.sleep(0.1 * (attempt + 1))
+
+
+def _read_extraction_checkpoint(index_only: bool) -> dict[str, Any]:
+    if not index_only or not STATUS_PATH.is_file():
+        return {}
+    try:
+        previous = json.loads(STATUS_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "The existing ingestion checkpoint is unreadable; refusing to replace it."
+        ) from exc
+    if not isinstance(previous, dict):
+        raise RuntimeError(
+            "The existing ingestion checkpoint is invalid; refusing to replace it."
+        )
+
+    preserved: dict[str, Any] = {}
+    for key in (
+        "archives_seen",
+        "pdfs_total",
+        "pdfs_extracted",
+        "pending_documents",
+        "failed_documents",
+    ):
+        value = previous.get(key, 0)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise RuntimeError(
+                "The existing ingestion checkpoint is invalid; refusing to replace it."
+            )
+        preserved[key] = value
+    recent_failures = previous.get("recent_failures", [])
+    if not isinstance(recent_failures, list):
+        raise RuntimeError(
+            "The existing ingestion checkpoint is invalid; refusing to replace it."
+        )
+    preserved["recent_failures"] = recent_failures[-100:]
+    storage_limited = previous.get("storage_limited", False)
+    if not isinstance(storage_limited, bool):
+        raise RuntimeError(
+            "The existing ingestion checkpoint is invalid; refusing to replace it."
+        )
+    preserved["storage_limited"] = storage_limited
+    return preserved
 
 
 def _record_failure(status: dict[str, Any], source: str, reason: str) -> None:
@@ -332,8 +379,16 @@ def _parse_years(value: str) -> list[int]:
 async def _index_documents(
     documents: list[tuple[Path, str, dict[str, Any]]],
     status: dict[str, Any],
+    *,
+    stop_on_error: bool = False,
+    stop_on_duplicate: bool = False,
 ) -> None:
-    status["documents_to_index"] = len(documents)
+    batch = status.get("batch")
+    status["documents_to_index"] = (
+        batch.get("size", len(documents))
+        if isinstance(batch, dict)
+        else len(documents)
+    )
     _write_status(status)
     if not await check_connection():
         raise DatabaseUnavailableError
@@ -350,8 +405,16 @@ async def _index_documents(
         try:
             if await repository.document_exists(document_id):
                 status["duplicates_skipped"] += 1
+                if stop_on_duplicate:
+                    _write_status(status)
+                    raise BatchSafetyError(
+                        f"Unexpected existing document ID in selected batch: {document_id}"
+                    )
             elif not _pdf_is_valid(path):
                 _record_failure(status, str(path), "Extracted file failed PDF signature validation.")
+                if stop_on_error:
+                    _write_status(status)
+                    raise BatchSafetyError("Selected PDF failed signature validation.")
             else:
                 processed = await processor.process(
                     path.name,
@@ -367,11 +430,16 @@ async def _index_documents(
                 status["documents_indexed"] += 1
                 status["chunks_indexed"] += chunks
         except Exception as exc:
+            if isinstance(exc, BatchSafetyError):
+                raise
             _record_failure(
                 status,
                 str(path),
                 f"Processing or indexing error ({type(exc).__name__}).",
             )
+            if stop_on_error:
+                _write_status(status)
+                raise
         if index % 10 == 0 or index == len(documents):
             _write_status(status)
             LOG.info(
@@ -437,6 +505,11 @@ def main() -> int:
         parser.error("--high-court-year must be between 1950 and 2026.")
 
     DATA_ROOT.mkdir(parents=True, exist_ok=True)
+    try:
+        extraction_progress = _read_extraction_checkpoint(args.index_only)
+    except RuntimeError as exc:
+        LOG.error("%s", exc)
+        return 1
     status = {
         "status": "running",
         "started_at": _utc_now(),
@@ -446,18 +519,18 @@ def main() -> int:
             "high_court_year": args.high_court_year,
             "high_court_id": args.high_court_id,
         },
-        "archives_seen": 0,
-        "pdfs_total": 0,
-        "pdfs_extracted": 0,
+        "archives_seen": extraction_progress.get("archives_seen", 0),
+        "pdfs_total": extraction_progress.get("pdfs_total", 0),
+        "pdfs_extracted": extraction_progress.get("pdfs_extracted", 0),
         "documents_to_index": 0,
         "documents_processed": 0,
         "documents_indexed": 0,
         "chunks_indexed": 0,
         "duplicates_skipped": 0,
-        "failed_documents": 0,
-        "pending_documents": 0,
-        "storage_limited": False,
-        "recent_failures": [],
+        "failed_documents": extraction_progress.get("failed_documents", 0),
+        "pending_documents": extraction_progress.get("pending_documents", 0),
+        "storage_limited": extraction_progress.get("storage_limited", False),
+        "recent_failures": extraction_progress.get("recent_failures", []),
     }
     _write_status(status)
 

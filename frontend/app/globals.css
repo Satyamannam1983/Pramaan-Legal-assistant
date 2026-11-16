@@ -927,6 +927,12 @@ a.citation-row:hover {
   gap: 16px;
 }
 
+.corpus-status-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .corpus-status {
   flex: 0 0 auto;
   border-radius: 999px;
